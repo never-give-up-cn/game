@@ -1,0 +1,34 @@
+# 编译输出
+build/
+bin/
+obj/
+dist/
+out/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log
+logs/
+
+# 临时文件
+temp/
+tmp/
+*.tmp
+
+# Node
+node_modules/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
