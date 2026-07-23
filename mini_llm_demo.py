@@ -55,16 +55,16 @@ except ImportError:
 
 # ========================== 超参数 ==========================
 class Config:
-    embed_dim = 64          # 嵌入维度
+    embed_dim = 128         # 嵌入维度（需整除 n_heads）
     n_heads = 4             # 注意力头数
     head_dim = embed_dim // n_heads  # 每头维度
-    block_size = 64         # 上下文窗口
-    n_layers = 4            # Transformer 层数
+    block_size = 128        # 上下文窗口
+    n_layers = 6            # Transformer 层数
     dropout = 0.1           # Dropout 比例
-    lr = 5e-4               # 峰值学习率
+    lr = 3e-4               # 峰值学习率
     weight_decay = 0.1      # AdamW 权重衰减
-    warmup_iters = 30       # Warmup 步数
-    max_epochs = 30         # 训练轮数
+    warmup_iters = 100      # Warmup 步数
+    max_epochs = 50         # 训练轮数
     grad_clip = 1.0         # 梯度裁剪阈值
     batch_size = 8          # 批次大小
     device = "cuda" if torch.cuda.is_available() else "cpu"
