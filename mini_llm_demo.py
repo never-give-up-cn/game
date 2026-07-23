@@ -57,6 +57,7 @@ except ImportError:
 class Config:
     embed_dim = 192         # 嵌入维度（需整除 n_heads）
     n_heads = 4             # 注意力头数
+    n_kv_heads = 2          # KV 头数（GQA: < n_heads 时可减少缓存）
     head_dim = embed_dim // n_heads  # 每头维度
     block_size = 256        # 上下文窗口
     n_layers = 8            # Transformer 层数
@@ -68,6 +69,8 @@ class Config:
     grad_clip = 1.0         # 梯度裁剪阈值
     batch_size = 8          # 批次大小
     gradient_accumulation_steps = 4  # 梯度累积步数（等效 batch = batch_size × accum）
+    label_smoothing = 0.1   # 标签平滑（正则化，防止过拟合）
+    compile_model = False   # torch.compile（Windows/CPU 不支持，CUDA/Linux 可开启）
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
@@ -226,50 +229,65 @@ class SwiGLUFFN(nn.Module):
         return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
 
 
-# ======================== 5. 多头自注意力 ========================
-class MultiHeadAttention(nn.Module):
-    """多头自注意力（集成 RoPE + Flash Attention + KV Cache）"""
+# ======================== 5. 分组查询注意力 (GQA) ========================
+class GroupedQueryAttention(nn.Module):
+    """分组查询多头注意力（GQA），集成 RoPE + Flash Attention + KV Cache
+    Llama 2/3 采用 GQA，用更少的 KV 头减少缓存，推理更快。
+    """
     def __init__(self, config: Config):
         super().__init__()
         self.n_heads = config.n_heads
+        self.n_kv_heads = config.n_kv_heads if hasattr(config, 'n_kv_heads') else config.n_heads
         self.head_dim = config.head_dim
         self.embed_dim = config.embed_dim
         self.dropout_p = config.dropout
 
-        self.qkv = nn.Linear(config.embed_dim, config.embed_dim * 3, bias=False)
-        self.proj = nn.Linear(config.embed_dim, config.embed_dim, bias=False)
+        # Q 投影（全量头数）
+        self.q_proj = nn.Linear(config.embed_dim, config.embed_dim, bias=False)
+        # K/V 投影（更少的头数，节省缓存）
+        kv_dim = self.n_kv_heads * self.head_dim
+        self.k_proj = nn.Linear(config.embed_dim, kv_dim, bias=False)
+        self.v_proj = nn.Linear(config.embed_dim, kv_dim, bias=False)
+        self.o_proj = nn.Linear(config.embed_dim, config.embed_dim, bias=False)
+
+        # 每组 Q 头数（用于将 KV 头重复广播到 Q 头数）
+        self.n_rep = self.n_heads // self.n_kv_heads
 
         cos, sin = precompute_rope_freqs(self.head_dim, config.block_size)
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
 
+    @staticmethod
+    def _repeat_kv(x, n_rep):
+        """将 KV 头重复 n_rep 次以匹配 Q 头数"""
+        if n_rep == 1:
+            return x
+        B, n_kv, T, head_dim = x.shape
+        return x[:, :, None, :, :].expand(B, n_kv, n_rep, T, head_dim).reshape(B, n_kv * n_rep, T, head_dim)
+
     def forward(self, x, kv_cache=None):
-        """
-        x: (B, T, embed_dim)
-        kv_cache: {'k': Tensor | None, 'v': Tensor | None} — 推理缓存
-        """
         B, T, C = x.shape
 
-        # 1) QKV 投影
-        qkv = self.qkv(x).split(self.embed_dim, dim=-1)
-        q, k, v = qkv  # 各 (B, T, embed_dim)
+        # 1) Q/K/V 独立投影
+        q = self.q_proj(x).view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
 
-        # 2) 分头: (B, nh, T, hs)
-        q = q.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
-        k = k.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
-        v = v.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
-
-        # 3) RoPE
+        # 2) RoPE（Q 全量头，K 仅 kv 头，节省计算）
         q = apply_rope(q, self.cos, self.sin)
         k = apply_rope(k, self.cos, self.sin)
 
-        # 4) KV Cache（不污染外部传入的字典，新构建返回）
+        # 3) KV Cache
         if kv_cache is not None:
             if kv_cache['k'] is not None:
                 k = torch.cat([kv_cache['k'], k], dim=2)
                 v = torch.cat([kv_cache['v'], v], dim=2)
             kv_cache['k'] = k
             kv_cache['v'] = v
+
+        # 4) 重复 KV 头以匹配 Q 头数（GQA 核心）
+        k = self._repeat_kv(k, self.n_rep)
+        v = self._repeat_kv(v, self.n_rep)
 
         # 5) Flash Attention
         is_causal = (kv_cache is None) and (T > 1)
@@ -281,7 +299,7 @@ class MultiHeadAttention(nn.Module):
 
         # 6) 合并头 + 输出投影
         out = attn_out.transpose(1, 2).contiguous().view(B, T, C)
-        return self.proj(out)
+        return self.o_proj(out)
 
 
 # ======================== 6. Transformer 块 ========================
@@ -293,7 +311,7 @@ class TransformerBlock(nn.Module):
         super().__init__()
         self.ln1 = RMSNorm(config.embed_dim)
         self.ln2 = RMSNorm(config.embed_dim)
-        self.attn = MultiHeadAttention(config)
+        self.attn = GroupedQueryAttention(config)
 
         hidden_dim = int(config.embed_dim * 4)
         # 对齐到 128 的倍数（改善矩阵乘法效率）
@@ -686,7 +704,7 @@ def main():
         use_amp = (config.device == "cuda")
         scaler = torch.amp.GradScaler(config.device, enabled=use_amp)
 
-        loss_fn = nn.CrossEntropyLoss()
+        loss_fn = nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
 
         # 早停参数
         best_val_loss = float('inf')
@@ -698,9 +716,11 @@ def main():
         step = 0
         overall_pct_interval = max(1, total_iters // 100)
         accum_steps = config.gradient_accumulation_steps
+        train_start_time = time.time()
         for epoch in range(1, config.max_epochs + 1):
             epoch_loss = 0.0
             num_batches = 0
+            epoch_start_time = time.time()
 
             for micro_idx, (x, y) in enumerate(tqdm(train_loader, desc=f"  Epoch {epoch:3d}/{config.max_epochs}", leave=False)):
                 x, y = x.to(config.device), y.to(config.device)
@@ -748,10 +768,12 @@ def main():
                 model.train()
 
             if epoch % 10 == 0 or epoch == 1 or epoch == config.max_epochs:
+                elapsed = time.time() - epoch_start_time
                 val_str = f", Val Loss: {val_loss:.4f}" if val_loss is not None else ""
                 print(f"    Epoch {epoch:3d}/{config.max_epochs} ({epoch/config.max_epochs*100:.0f}%), "
                       f"Loss: {avg_loss:.4f}{val_str}, "
-                      f"LR: {scheduler.get_lr():.6f}")
+                      f"LR: {scheduler.get_lr():.6f}, "
+                      f"Time: {elapsed:.1f}s")
 
             # 早停判断
             if val_loss is not None:
