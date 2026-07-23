@@ -5,7 +5,7 @@
 集成了现代大型语言模型的核心技术。
 
 核心技术
-  ✓ 字符级 Tokenizer（CharTokenizer）
+  ✓ 字符级 Tokenizer（CharTokenizer，含 UNK 保护）
   ✓ RoPE 旋转位置编码（Rotary Position Embedding）
   ✓ RMSNorm 归一化（替代 LayerNorm）
   ✓ SwiGLU 门控激活函数（替代 GELU）
@@ -18,6 +18,13 @@
   ✓ Dropout 正则化
   ✓ 梯度裁剪（Gradient Clipping）
   ✓ 混合精度训练（AMP，仅 CUDA 时启用）
+
+交互功能
+  ✓ --chat 交互式中文对话模式
+  ✓ 检查点自动校验数据指纹 + 超参指纹
+  ✓ Top-K + Top-P 双重采样
+  ✓ 未知字符容错
+  ✓ 边界保护（短文本、温度溢出、RoPE 越界）
 """
 
 import io, os, sys, time, math, argparse
@@ -71,7 +78,6 @@ MAX_TRAIN_CHARS = 50000  # 截取前 N 字符（None = 全量）
 
 def _load_training_text():
     """依次尝试加载中文小说 → 英文爱丽丝 → 默认回退"""
-
     # 1) 优先加载中文小说
     if os.path.exists(CN_NOVEL_FILE):
         print(f"  ✓ 加载中文训练文本: {CN_NOVEL_FILE}")
@@ -83,7 +89,6 @@ def _load_training_text():
             print(f"  文本过长 ({len(text):,} 字符)，截取前 {MAX_TRAIN_CHARS:,} 字符")
             text = text[:MAX_TRAIN_CHARS]
         return text.strip()
-
     # 2) 回退：英文爱丽丝漫游仙境
     if os.path.exists(EN_ALICE_FILE):
         print(f"  ✓ 加载英文训练文本: {EN_ALICE_FILE}")
@@ -99,7 +104,6 @@ def _load_training_text():
             text = text[first_content:]
             text = text.split("\n", 1)[-1] if "\n" in text else text
         return text.strip()
-
     # 3) 最终回退
     print(f"  ⚠ 未找到训练文本文件，使用默认简短文本")
     return (
@@ -114,24 +118,30 @@ TRAIN_TEXT = _load_training_text()
 
 
 # ======================== 1. 字符级 Tokenizer ========================
+UNK_TOKEN = '<UNK>'
+
 class CharTokenizer:
     """字符级 Tokenizer — 演示用
     将文本按字符切分，建立字符 ↔ ID 的映射。
     真实 LLM 使用 BPE / SentencePiece 等子词分词器。
+    修复: 遇到未知字符返回 <UNK> 而不是抛 KeyError。
     """
     def __init__(self, text):
         chars = sorted(set(text))
-        self.vocab_size = len(chars)
-        self.stoi = {ch: i for i, ch in enumerate(chars)}  # char → id
-        self.itos = {i: ch for i, ch in enumerate(chars)}  # id → char
+        self.vocab_size = len(chars) + 1  # +1 留给 UNK
+        self.stoi = {ch: i for i, ch in enumerate(chars)}
+        self.stoi[UNK_TOKEN] = len(chars)  # 最后一位
+        self.itos = {i: ch for i, ch in enumerate(chars)}
+        self.itos[len(chars)] = UNK_TOKEN
+        self.unk_id = self.stoi[UNK_TOKEN]
 
     def encode(self, s):
-        """将字符串转为 token ID 列表"""
-        return [self.stoi[c] for c in s]
+        """将字符串转为 token ID 列表，未知字符替换为 UNK"""
+        return [self.stoi.get(c, self.unk_id) for c in s]
 
     def decode(self, ids):
         """将 token ID 列表还原为字符串"""
-        return ''.join(self.itos[i] for i in ids)
+        return ''.join(self.itos.get(i, UNK_TOKEN) for i in ids)
 
     def __repr__(self):
         return f"CharTokenizer(vocab_size={self.vocab_size})"
@@ -170,21 +180,21 @@ def precompute_rope_freqs(dim, max_seq_len, theta=10000.0):
 def apply_rope(x, cos, sin):
     """对 Q 或 K 应用 RoPE 旋转
     x:   (B, nh, T, hs) 或 (B, T, D)
-    cos: (T, hs//2)
+    cos: (T, hs//2)   — 预计算表，需确保 T ≤ cos.size(0)
     sin: (T, hs//2)
-
-    对每对维度 (x_i, x_{i+hs//2}) 执行二维旋转:
-      x'_i     = x_i * cos - x_{i+hs//2} * sin
-      x'_{i+hs//2} = x_i * sin + x_{i+hs//2} * cos
     """
     half = x.shape[-1] // 2
     x1, x2 = x[..., :half], x[..., half:]
-    cos = cos[:x.shape[-2], ...]  # 截取到当前序列长度
-    sin = sin[:x.shape[-2], ...]
-    # 对齐维度方便广播
-    while cos.dim() < x.dim():
-        cos, sin = cos.unsqueeze(0), sin.unsqueeze(0)
-    x_rotated = torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
+    seq_len = x.shape[-2]
+    # 防越界保护：如果序列长度超过预计算表，截断序列
+    if seq_len > cos.size(0):
+        x1, x2 = x1[..., :cos.size(0), :], x2[..., :cos.size(0), :]
+        seq_len = cos.size(0)
+    cos_ = cos[:seq_len, ...]
+    sin_ = sin[:seq_len, ...]
+    while cos_.dim() < x.dim():
+        cos_, sin_ = cos_.unsqueeze(0), sin_.unsqueeze(0)
+    x_rotated = torch.cat([x1 * cos_ - x2 * sin_, x1 * sin_ + x2 * cos_], dim=-1)
     return x_rotated
 
 
@@ -193,9 +203,6 @@ class SwiGLU(nn.Module):
     """Swish-Gated Linear Unit
     SwiGLU(x) = silu(x @ W_gate) * (x @ W_value)
     相比 GELU 在相同参数量下效果更好，是 PaLM、Llama 等使用的 FFN 变体。
-
-    实现方式：单个 Linear 输出 2×hidden_dim，
-    然后 chunk 为 gate 和 value 两部分相乘。
     """
     def __init__(self, hidden_dim):
         super().__init__()
@@ -208,14 +215,7 @@ class SwiGLU(nn.Module):
 
 # ======================== 5. 多头自注意力 ========================
 class MultiHeadAttention(nn.Module):
-    """多头自注意力（集成 RoPE + Flash Attention + KV Cache）
-
-    现代 LLM 注意力层的标准实现，包含：
-    - RoPE 位置编码（替代可学习位置嵌入）
-    - PyTorch 2.0 Flash Attention（`scaled_dot_product_attention`）
-    - KV Cache 支持（推理时缓存 K/V 矩阵避免重复计算）
-    - Dropout 正则化
-    """
+    """多头自注意力（集成 RoPE + Flash Attention + KV Cache）"""
     def __init__(self, config: Config):
         super().__init__()
         self.n_heads = config.n_heads
@@ -223,12 +223,9 @@ class MultiHeadAttention(nn.Module):
         self.embed_dim = config.embed_dim
         self.dropout_p = config.dropout
 
-        # QKV 统一投影
         self.qkv = nn.Linear(config.embed_dim, config.embed_dim * 3, bias=False)
-        # 输出投影
         self.proj = nn.Linear(config.embed_dim, config.embed_dim, bias=False)
 
-        # 预计算 RoPE 表
         cos, sin = precompute_rope_freqs(self.head_dim, config.block_size)
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
@@ -249,22 +246,19 @@ class MultiHeadAttention(nn.Module):
         k = k.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
         v = v.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
 
-        # 3) RoPE（对 Q 和 K 应用旋转位置编码）
+        # 3) RoPE
         q = apply_rope(q, self.cos, self.sin)
         k = apply_rope(k, self.cos, self.sin)
 
-        # 4) KV Cache
+        # 4) KV Cache（不污染外部传入的字典，新构建返回）
         if kv_cache is not None:
-            # 首次调用时 cache 为 None，后续调用拼接历史 K/V
             if kv_cache['k'] is not None:
                 k = torch.cat([kv_cache['k'], k], dim=2)
                 v = torch.cat([kv_cache['v'], v], dim=2)
             kv_cache['k'] = k
             kv_cache['v'] = v
 
-        # 5) Flash Attention（PyTorch 2.0 SDPA）
-        # is_causal=True 自动生成上三角因果掩码
-        # 当使用 KV Cache 且 T_q=1 时不需要掩码（已是最新位置）
+        # 5) Flash Attention
         is_causal = (kv_cache is None) and (T > 1)
         attn_out = F.scaled_dot_product_attention(
             q, k, v,
@@ -281,7 +275,6 @@ class MultiHeadAttention(nn.Module):
 class TransformerBlock(nn.Module):
     """Transformer 解码器块
     Pre-Norm 结构：先归一化再进入子层，残差连接在外。
-    顺序: RMSNorm → Attention → 残差 → RMSNorm → SwiGLU FFN → 残差
     """
     def __init__(self, config: Config):
         super().__init__()
@@ -289,10 +282,9 @@ class TransformerBlock(nn.Module):
         self.ln2 = RMSNorm(config.embed_dim)
         self.attn = MultiHeadAttention(config)
 
-        # SwiGLU FFN: Linear → SwiGLU → Linear
         hidden_dim = int(config.embed_dim * 4)
         self.mlp = nn.Sequential(
-            nn.Linear(config.embed_dim, hidden_dim * 2, bias=False),  # 2× 给 SwiGLU 门控
+            nn.Linear(config.embed_dim, hidden_dim * 2, bias=False),
             SwiGLU(hidden_dim),
             nn.Linear(hidden_dim, config.embed_dim, bias=False),
         )
@@ -306,12 +298,7 @@ class TransformerBlock(nn.Module):
 
 # ======================== 7. MiniLLM 模型 ========================
 class MiniLLM(nn.Module):
-    """迷你 LLM — 现代 GPT 解码器架构
-
-    架构: Token Embedding → N×TransformerBlock → RMSNorm → Linear Head
-    注意：位置信息通过 RoPE 编码（在 Attention 内部），
-    因此不再需要可学习的位置嵌入。
-    """
+    """迷你 LLM — 现代 GPT 解码器架构"""
     def __init__(self, config: Config, vocab_size: int):
         super().__init__()
         self.config = config
@@ -324,7 +311,6 @@ class MiniLLM(nn.Module):
         self.ln_final = RMSNorm(config.embed_dim)
         self.head = nn.Linear(config.embed_dim, vocab_size, bias=False)
 
-        # 权重初始化（现代 LLM 的标准做法）
         self.apply(self._init_weights)
 
     def _init_weights(self, module):
@@ -352,7 +338,8 @@ class MiniLLM(nn.Module):
         return logits
 
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, use_kv_cache=False, temperature=1.0, top_k=None):
+    def generate(self, idx, max_new_tokens, use_kv_cache=False,
+                 temperature=1.0, top_k=None, top_p=None):
         """自回归生成文本
 
         Args:
@@ -361,35 +348,62 @@ class MiniLLM(nn.Module):
             use_kv_cache: 是否使用 KV Cache 加速
             temperature: 采样温度（>1 更随机，<1 更确定）
             top_k: 只从概率最高的 k 个 token 中采样
+            top_p: 累积概率阈值（Nucleus Sampling），0~1
         """
-        if use_kv_cache:
-            return self._generate_with_cache(idx, max_new_tokens, temperature, top_k)
-        else:
-            return self._generate_no_cache(idx, max_new_tokens, temperature, top_k)
+        # 边界保护：裁剪到 block_size
+        idx = idx[:, -self.config.block_size:]
 
-    def _generate_no_cache(self, idx, max_new_tokens, temperature, top_k):
+        # 温度下限保护
+        temperature = max(temperature, 1e-5)
+
+        if use_kv_cache:
+            return self._generate_with_cache(idx, max_new_tokens, temperature, top_k, top_p)
+        else:
+            return self._generate_no_cache(idx, max_new_tokens, temperature, top_k, top_p)
+
+    @staticmethod
+    def _sample(logits, temperature, top_k, top_p):
+        """统一的采样逻辑：温度缩放 → Top-K 过滤 → Top-P 过滤 → 采样"""
+        logits = logits / temperature
+
+        # Top-K 过滤
+        if top_k is not None:
+            v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+            logits[logits < v[:, [-1]]] = float('-inf')
+
+        probs = F.softmax(logits, dim=-1)
+
+        # Top-P (Nucleus) 过滤
+        if top_p is not None:
+            sorted_probs, sorted_indices = torch.sort(probs, descending=True, dim=-1)
+            cumsum = torch.cumsum(sorted_probs, dim=-1)
+            # 保留累积概率 <= top_p 的 token（至少保留一个）
+            mask = cumsum - sorted_probs > top_p
+            sorted_probs[mask] = 0.0
+            sorted_probs = sorted_probs / sorted_probs.sum(dim=-1, keepdim=True)
+            # 从排序后的分布中采样，再映射回原始索引
+            sampled_idx = torch.multinomial(sorted_probs, num_samples=1)
+            next_token = torch.gather(sorted_indices, -1, sampled_idx)
+            return next_token
+
+        next_token = torch.multinomial(probs, num_samples=1)
+        return next_token
+
+    def _generate_no_cache(self, idx, max_new_tokens, temperature, top_k, top_p):
         """无 KV Cache 的朴素生成（每步重新计算所有位置）"""
         for _ in range(max_new_tokens):
             idx_crop = idx[:, -self.config.block_size:]
-            logits = self(idx_crop)  # (B, T, vocab_size)
-            logits = logits[:, -1, :] / temperature  # 取最后一位
-
-            # Top-K 采样
-            if top_k is not None:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = float('-inf')
-
-            probs = F.softmax(logits, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1)
+            logits = self(idx_crop)
+            logits = logits[:, -1, :]
+            next_token = self._sample(logits, temperature, top_k, top_p)
             idx = torch.cat((idx, next_token), dim=1)
         return idx
 
-    def _generate_with_cache(self, idx, max_new_tokens, temperature, top_k):
+    def _generate_with_cache(self, idx, max_new_tokens, temperature, top_k, top_p):
         """使用 KV Cache 加速生成
-        首次前向处理完整 prompt 并缓存 K/V，
-        后续每步只处理最后 1 个 token。
+        每次调用创建全新的缓存字典，杜绝跨调用污染。
         """
-        # 初始化各层的 KV 缓存
+        # 全新缓存 —— 每个生成调用独立
         kv_caches = [{'k': None, 'v': None} for _ in range(self.config.n_layers)]
 
         generated = idx.clone()
@@ -397,27 +411,13 @@ class MiniLLM(nn.Module):
 
         # 第一步：处理 prompt（完整序列，填充缓存）
         logits = self(idx, kv_caches=kv_caches)
-        next_logit = logits[:, -1, :] / temperature
-
-        if top_k is not None:
-            v, _ = torch.topk(next_logit, min(top_k, next_logit.size(-1)))
-            next_logit[next_logit < v[:, [-1]]] = float('-inf')
-
-        probs = F.softmax(next_logit, dim=-1)
-        next_token = torch.multinomial(probs, num_samples=1)
+        next_token = self._sample(logits[:, -1, :], temperature, top_k, top_p)
         generated = torch.cat((generated, next_token), dim=1)
 
         # 后续步骤：每次只送入最后 1 个 token
         for _ in range(max_new_tokens - 1):
             logits = self(next_token, kv_caches=kv_caches)  # T=1
-            next_logit = logits[:, -1, :] / temperature
-
-            if top_k is not None:
-                v, _ = torch.topk(next_logit, min(top_k, next_logit.size(-1)))
-                next_logit[next_logit < v[:, [-1]]] = float('-inf')
-
-            probs = F.softmax(next_logit, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1)
+            next_token = self._sample(logits[:, -1, :], temperature, top_k, top_p)
             generated = torch.cat((generated, next_token), dim=1)
 
         return generated
@@ -429,12 +429,23 @@ def prepare_data(text, tokenizer, config: Config):
     tokens = tokenizer.encode(text)
     print(f"  文本长度: {len(text)} 字符, {len(tokens)} tokens")
 
-    # 滑动窗口创建序列（50% 重叠）
+    # 边界保护：文本太短时填充
     stride = config.block_size // 2
+    max_start = len(tokens) - config.block_size
+    if max_start <= 0:
+        print(f"  ⚠ 文本不足一条序列 ({len(tokens)} tokens)，自动填充")
+        pad_len = config.block_size + 1 - len(tokens)
+        tokens = tokens + [0] * max(0, pad_len)
+        max_start = 1  # 至少生成一条
+
     seqs = []
-    for i in range(0, len(tokens) - config.block_size, stride):
+    for i in range(0, max_start, stride):
         seq = tokens[i:i + config.block_size + 1]
         seqs.append(seq)
+
+    # 极端保护（理论上不会触发，但防御性编程）
+    if not seqs:
+        seqs.append(tokens[:config.block_size + 1])
 
     data = torch.tensor(seqs, dtype=torch.long)
     x = data[:, :-1]  # 输入
@@ -462,10 +473,8 @@ class WarmupCosineLR:
 
     def step(self, it):
         if it < self.warmup_iters:
-            # 线性上升
             self.current_lr = self.peak_lr * it / max(1, self.warmup_iters)
         else:
-            # Cosine 衰减
             progress = (it - self.warmup_iters) / max(1, self.max_iters - self.warmup_iters)
             self.current_lr = self.min_lr + 0.5 * (self.peak_lr - self.min_lr) * (
                 1 + math.cos(math.pi * progress)
@@ -477,42 +486,93 @@ class WarmupCosineLR:
         return self.current_lr
 
 
+# ======================== 检查点管理（含数据指纹 + 超参指纹） ========================
 MODEL_PATH = os.path.join(os.path.dirname(__file__) or ".", "mini_llm_checkpoint.pt")
 
 
-def save_checkpoint(model, tokenizer, train_text, path=MODEL_PATH):
-    """保存模型权重 + tokenizer + 数据指纹 到文件"""
+def _config_fingerprint(config):
+    """生成超参指纹，用于检测超参变更"""
+    return hash((
+        config.embed_dim, config.n_heads, config.block_size,
+        config.n_layers, config.dropout, config.lr,
+        config.max_epochs, config.grad_clip,
+    ))
+
+
+def save_checkpoint(model, tokenizer, train_text, config, path=MODEL_PATH):
+    """保存模型权重 + tokenizer + 数据指纹 + 超参指纹"""
     checkpoint = {
         'model_state_dict': model.state_dict(),
         'vocab_size': tokenizer.vocab_size,
         'stoi': tokenizer.stoi,
         'itos': tokenizer.itos,
-        'data_hash': hash(train_text),  # 训练文本指纹，用于检测数据是否变更
+        'data_hash': hash(train_text),
+        'config_fingerprint': _config_fingerprint(config),
     }
     torch.save(checkpoint, path)
     print(f"  ✓ 模型已保存到 {path}")
 
 
-def load_checkpoint(path, train_text, device='cpu'):
-    """从文件加载模型权重和 tokenizer，校验数据指纹"""
+def load_checkpoint(path, train_text, config, device='cpu'):
+    """从文件加载模型权重和 tokenizer，校验指纹"""
     checkpoint = torch.load(path, map_location=device, weights_only=True)
-    # 校验训练文本是否一致（数据变了就忽略缓存）
+
+    # 校验训练文本指纹
     if checkpoint.get('data_hash') != hash(train_text):
         print(f"  ⚠ 训练数据已变更，忽略旧缓存")
         return None, None
+
+    # 校验超参指纹
+    if checkpoint.get('config_fingerprint') != _config_fingerprint(config):
+        print(f"  ⚠ 超参已变更，忽略旧缓存")
+        return None, None
+
     tokenizer = CharTokenizer.__new__(CharTokenizer)
     tokenizer.vocab_size = checkpoint['vocab_size']
     tokenizer.stoi = checkpoint['stoi']
     tokenizer.itos = {int(k): v for k, v in checkpoint['itos'].items()}
+    tokenizer.unk_id = tokenizer.stoi.get(UNK_TOKEN, tokenizer.vocab_size - 1)
     return checkpoint['model_state_dict'], tokenizer
 
 
-# ======================== 10. 主程序 ========================
+# ======================== 10. 交互式对话 ========================
+def run_chat_mode(model, tokenizer, config):
+    """交互式中文对话：用户输入 prompt，模型续写"""
+    print("\n" + "=" * 60)
+    print("  交互式对话模式 — 输入中文 prompt，Ctrl+C 退出")
+    print("=" * 60)
+    model.eval()
+    while True:
+        try:
+            prompt = input("\n  You: ").strip()
+            if not prompt:
+                continue
+            prompt_ids = torch.tensor(
+                [tokenizer.encode(prompt)], dtype=torch.long, device=config.device
+            )
+            out = model.generate(
+                prompt_ids,
+                max_new_tokens=80,
+                use_kv_cache=True,
+                temperature=0.7,
+                top_k=20,
+                top_p=0.9,
+            )
+            reply = tokenizer.decode(out[0].tolist())
+            print(f"  LLM: {reply}")
+        except KeyboardInterrupt:
+            print("\n  退出对话模式")
+            break
+
+
+# ======================== 11. 主程序 ========================
 def main():
     config = Config()
     parser = argparse.ArgumentParser(description="迷你 LLM 演示")
     parser.add_argument('--retrain', action='store_true',
-                        help='强制重新训练（默认：已有检查点时跳过训练）')
+                        help='强制重新训练（默认：有检查点时跳过）')
+    parser.add_argument('--chat', action='store_true',
+                        help='交互式对话模式（训练/加载后进入对话循环）')
     args = parser.parse_args()
     print("=" * 60)
     print("  增强版迷你 LLM — 现代 LLM 技术全演示")
@@ -535,17 +595,17 @@ def main():
     print(f"  架构: {config.n_layers} 层 × {config.n_heads} 头, "
           f"embed_dim={config.embed_dim}, block_size={config.block_size}")
 
-    # ---- 检查是否有保存的模型 + 训练 ----
+    # ---- 检查是否有保存的模型 ----
     need_train = True
     if os.path.exists(MODEL_PATH) and not args.retrain:
         print(f"\n  发现已保存模型 ({MODEL_PATH})，加载中...")
-        state_dict, _ = load_checkpoint(MODEL_PATH, TRAIN_TEXT, config.device)
+        state_dict, tokenizer = load_checkpoint(MODEL_PATH, TRAIN_TEXT, config, config.device)
         if state_dict is not None:
             model.load_state_dict(state_dict)
             print(f"  ✓ 已加载训练好的模型，跳过训练")
             need_train = False
         else:
-            print(f"  → 训练数据已变更，将重新训练")
+            print(f"  → 将重新训练")
     elif args.retrain:
         print(f"\n  --retrain 参数指定，重新训练...")
 
@@ -557,7 +617,6 @@ def main():
         # ---- 4. 训练 ----
         print("\n[4/5] 开始训练...")
 
-        # 优化器: AdamW（带解耦权重衰减）
         optimizer = torch.optim.AdamW(
             model.parameters(),
             lr=config.lr,
@@ -565,7 +624,6 @@ def main():
             betas=(0.9, 0.95),
         )
 
-        # 学习率调度器
         total_iters = config.max_epochs * len(train_loader)
         scheduler = WarmupCosineLR(
             optimizer,
@@ -575,13 +633,11 @@ def main():
             min_lr=config.lr * 0.1,
         )
 
-        # 混合精度（仅 CUDA 时启用）
         use_amp = (config.device == "cuda")
         scaler = torch.amp.GradScaler(config.device, enabled=use_amp)
 
         loss_fn = nn.CrossEntropyLoss()
 
-        # 训练循环
         model.train()
         step = 0
         overall_pct_interval = max(1, total_iters // 100)
@@ -592,28 +648,21 @@ def main():
             for x, y in tqdm(train_loader, desc=f"  Epoch {epoch:3d}/{config.max_epochs}", leave=False):
                 x, y = x.to(config.device), y.to(config.device)
 
-                # 混合精度前向
                 with torch.amp.autocast(device_type=config.device, enabled=use_amp):
-                    logits = model(x)  # (B, T, vocab_size)
+                    logits = model(x)
                     loss = loss_fn(logits.view(-1, vocab_size), y.view(-1))
 
-                # 反向传播（AMP scaler）
                 scaler.scale(loss).backward()
-
-                # 梯度裁剪
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
 
-                # 更新参数
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
 
-                # 更新学习率
                 scheduler.step(step)
                 step += 1
 
-                # 显示总体训练百分比
                 if step % overall_pct_interval == 0:
                     overall_pct = step / total_iters * 100
                     print(f"    总体训练进度: {overall_pct:.1f}%")
@@ -627,16 +676,15 @@ def main():
                       f"Loss: {avg_loss:.4f}, "
                       f"LR: {scheduler.get_lr():.6f}")
 
-        # 训练完成后保存模型到文件（下次启动直接加载）
-        save_checkpoint(model, tokenizer, TRAIN_TEXT)
+        save_checkpoint(model, tokenizer, TRAIN_TEXT, config)
+
+    # ---- 如果指定 --chat 则进入交互模式 ----
+    if args.chat:
+        run_chat_mode(model, tokenizer, config)
+        return
 
     # ---- 5. 生成测试 ----
     print("\n[5/5] 生成测试...")
-
-    # 训练前：用同一个模型（刚初始化时），但我们已经训练完了。
-    # 无法展示"训练前"状态，但可以用一个随机初始化的副本来对比。
-    # 更简单的方式：用训练好的模型生成几个不同 prompt 的结果。
-
     model.eval()
 
     # 测试 prompt（从训练文本中选取）
@@ -658,6 +706,7 @@ def main():
             use_kv_cache=True,
             temperature=0.5,
             top_k=10,
+            top_p=0.9,
         )
         generated_text = tokenizer.decode(out[0].tolist())
         print(f"\n  Prompt: \"{prompt}\"")
@@ -669,14 +718,12 @@ def main():
         [tokenizer.encode("校花的贴身")], dtype=torch.long, device=config.device
     )
 
-    # 无缓存
     torch.cuda.synchronize() if config.device == "cuda" else None
     start = time.time()
     _ = model.generate(prompt_ids, max_new_tokens=100, use_kv_cache=False, temperature=0.5)
     torch.cuda.synchronize() if config.device == "cuda" else None
     time_no_cache = time.time() - start
 
-    # 有缓存
     torch.cuda.synchronize() if config.device == "cuda" else None
     start = time.time()
     _ = model.generate(prompt_ids, max_new_tokens=100, use_kv_cache=True, temperature=0.5)
@@ -692,20 +739,25 @@ def main():
     print("  演示结束 — 技术清单")
     print("=" * 60)
     techniques = [
-        ("CharTokenizer", "字符级分词"),
+        ("CharTokenizer+UNK", "字符级分词 + 未知字符容错"),
         ("RMSNorm", "均方根归一化"),
         ("RoPE", "旋转位置编码"),
         ("SwiGLU", "门控激活函数"),
         ("Flash Attention", "PyTorch 2.0 SDPA"),
-        ("KV Cache", "推理加速缓存"),
+        ("KV Cache", "推理加速缓存 + 隔离"),
+        ("Top-K + Top-P", "双重采样策略"),
         ("AdamW", "解耦权重衰减优化器"),
         ("Warmup + Cosine", "学习率调度"),
         ("Dropout", "正则化"),
         ("Gradient Clipping", "梯度裁剪"),
         ("AMP", "混合精度训练"),
+        ("Checkpoint", "数据/超参双指纹校验"),
     ]
     for name, desc in techniques:
         print(f"  ✓ {name:20s} — {desc}")
+
+    # 提示 --chat 模式
+    print("\n  💡 试试交互模式: python3 mini_llm_demo.py --chat")
 
 
 if __name__ == "__main__":
