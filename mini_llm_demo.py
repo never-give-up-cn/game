@@ -64,98 +64,36 @@ class Config:
 
 
 # ========================== 训练文本 ==========================
-TRAIN_TEXT = r"""The greatest glory in living lies not in never falling, but in rising every time we fall.
-The way to get started is to quit talking and begin doing.
-Life is what happens when you're busy making other plans.
-The future belongs to those who believe in the beauty of their dreams.
-It is during our darkest moments that we must focus to see the light.
-Do not go where the path may lead, go instead where there is no path and leave a trail.
-In the end, it is not the years in your life that count, it is the life in your years.
-Many of life's failures are people who did not realize how close they were to success when they gave up.
-Twenty years from now you will be more disappointed by the things that you did not do than by the ones you did do.
-The only impossible journey is the one you never begin.
-Believe you can and you're halfway there.
-Storms make trees take deeper roots.
-Don't watch the clock; do what it does. Keep going.
-A smooth sea never made a skilled sailor.
-You miss one hundred percent of the shots you don't take.
-Hardships often prepare ordinary people for an extraordinary destiny.
-Start where you are. Use what you have. Do what you can.
-Success is not final, failure is not fatal: it is the courage to continue that counts.
-It does not matter how slowly you go as long as you do not stop.
-Your time is limited, so don't waste it living someone else's life.
-If you look for the good in people, you will find it.
-Difficult roads often lead to beautiful destinations.
-Dream big and dare to fail.
-Keep your face always toward the sunshine, and shadows will fall behind you.
-The harder you work for something, the greater you will feel when you achieve it.
-Do not wait; the time will never be just right.
-Courage is resistance to fear, mastery of fear, not absence of fear.
-Act as if what you do makes a difference. It does.
-Nothing is impossible, the word itself says I'm possible.
-Success usually comes to those who are too busy to be looking for it.
-Don't be pushed around by the fears in your mind. Be led by the dreams in your heart.
-Every exit is an entrance to somewhere else.
-Be the change that you wish to see in the world.
-You have within you right now, everything you need to deal with whatever the world can throw at you.
-Great things never came from comfort zones.
-If opportunity doesn't knock, build a door.
-To live is the rarest thing in the world. Most people just exist.
-You can always find a solution if you try hard enough.
-Everything you have ever wanted is on the other side of fear.
-Live as if you were to die tomorrow. Learn as if you were to live forever.
-We may encounter many defeats but we must not be defeated.
-Don't count the days, make the days count.
-Small steps are still steps forward.
-The best way to predict your future is to create it.
-Never let the fear of striking out keep you from playing the game.
-The secret of getting ahead is getting started.
-Challenges are what make life interesting and overcoming them is what makes life meaningful.
-Stay hungry, stay foolish.
-Life is either a daring adventure or nothing at all.
-When everything seems to be going against you, remember that the airplane takes off against the wind, not with it.
-Peace comes from within. Do not seek it without.
-Turn your wounds into wisdom.
-A person who has no imagination has no wings.
-Optimism is the faith that leads to achievement. Nothing can be done without hope and confidence.
-Be kind whenever possible. It is always possible.
-Work hard in silence, let your success be your noise.
-What lies behind us and what lies before us are tiny matters compared to what lies within us.
-You do not find the happy life. You make it.
-Failure is simply the opportunity to begin again, this time more intelligently.
-Do what you can, with what you have, where you are.
-The mind is everything. What you think you become.
-Don't limit your challenges. Challenge your limits.
-Every great dream begins with a dreamer.
-Patience is not the ability to wait, but the ability to keep a good attitude while waiting.
-Do not spoil what you have by desiring what you have not.
-Growth begins at the end of your comfort zone.
-It always seems impossible until it is done.
-If you cannot fly then run, if you cannot run then walk, if you cannot walk then crawl, but whatever you do you have to keep moving forward.
-Happiness is not something ready made. It comes from your own actions.
-Be faithful in small things because it is in them that your strength lies.
-You are never too old to set another goal or to dream a new dream.
-The greatest wealth is to live content with little.
-Do not lose hope, miracles happen every day.
-Self-belief and hard work will always earn you success.
-Let your hopes, not your hurts, shape your future.
-Life shrinks or expands in proportion to one's courage.
-Nothing in life is to be feared, it is only to be understood.
-Keep going, your hardest times often lead to the greatest moments of your life.
-If you want to lift yourself up, lift up someone else.
-The power of imagination makes us infinite.
-We generate fears while we sit. We overcome them by action.
-Kindness is a language which the deaf can hear and the blind can see.
-Great works are performed not by strength but by perseverance.
-Don't give up just because of what someone said. Use that as motivation to push harder.
-Every day brings new choices.
-You can't cross the sea merely by standing and staring at the water.
-Light tomorrow with today.
-Believe in yourself and all that you are.
-There is no substitute for hard work.
-Take the first step in faith. You don't have to see the whole staircase.
-The best preparation for tomorrow is doing your best today.
-"""
+ALICE_FILE = os.path.join(os.path.dirname(__file__) or ".", "alice_in_wonderland.txt")
+
+def _load_training_text():
+    """从文件加载训练文本，剔除 Project Gutenberg 的页眉页脚"""
+    try:
+        text = open(ALICE_FILE, 'r', encoding='utf-8').read()
+    except FileNotFoundError:
+        print(f"  ⚠ 未找到 {ALICE_FILE}，使用默认简短文本")
+        return (
+            "Alice was beginning to get very tired of sitting by her sister on the bank, "
+            "and of having nothing to do: once or twice she had peeped into the book her "
+            "sister was reading, but it had no pictures or conversations in it, "
+            "\"and what is the use of a book,\" thought Alice \"without pictures or conversations?\""
+        )
+    # 截取正文：去除 Gutenberg 页眉/页脚标记
+    start = text.find("*** START")
+    end = text.find("*** END")
+    if start != -1:
+        text = text[start:]
+    if end != -1:
+        text = text[:end]
+    # 去掉开头的 *** START ... *** 行
+    first_content = text.find("***")
+    if first_content != -1:
+        # 跳过第一行 *** START ... ***
+        text = text[first_content:]
+        text = text.split("\n", 1)[-1] if "\n" in text else text
+    return text.strip()
+
+TRAIN_TEXT = _load_training_text()
 
 
 # ======================== 1. 字符级 Tokenizer ========================
