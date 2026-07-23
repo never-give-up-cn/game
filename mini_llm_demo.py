@@ -1,166 +1,599 @@
 """
-极简迷你 LLM（Mini GPT Demo）— 纯 CPU 可运行
-==============================================
-只演示核心原理：Token 嵌入 + 多头自注意力 + Transformer 解码器（GPT 结构）
-参数量很小，无法真正流畅对话，仅用于理解底层逻辑。
+增强版迷你 LLM（Mini GPT Demo）— 现代 LLM 技术全演示
+=====================================================
+在保持单文件、纯 CPU/GPU 可运行的前提下，
+集成了现代大型语言模型的核心技术。
+
+核心技术
+  ✓ 字符级 Tokenizer（CharTokenizer）
+  ✓ RoPE 旋转位置编码（Rotary Position Embedding）
+  ✓ RMSNorm 归一化（替代 LayerNorm）
+  ✓ SwiGLU 门控激活函数（替代 GELU）
+  ✓ Flash Attention（PyTorch 2.0 SDPA + 因果掩码）
+  ✓ KV Cache（推理阶段加速，附对比）
+
+训练技术
+  ✓ AdamW 优化器（解耦权重衰减）
+  ✓ 学习率 Warmup + Cosine Decay 调度
+  ✓ Dropout 正则化
+  ✓ 梯度裁剪（Gradient Clipping）
+  ✓ 混合精度训练（AMP，仅 CUDA 时启用）
 """
 
-import io, sys
+import io, sys, time, math
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import DataLoader, TensorDataset
 
-# -------------------------- 超参数 --------------------------
-vocab_size = 64       # 词表大小
-embed_dim = 32        # 嵌入维度
-n_heads = 2           # 注意力头数
-block_size = 16       # 上下文窗口长度
-n_layers = 2          # Transformer 层数
-device = "cpu"        # 纯 CPU 运行
+# ========================== 超参数 ==========================
+class Config:
+    embed_dim = 64          # 嵌入维度
+    n_heads = 4             # 注意力头数
+    head_dim = embed_dim // n_heads  # 每头维度
+    block_size = 64         # 上下文窗口
+    n_layers = 4            # Transformer 层数
+    dropout = 0.1           # Dropout 比例
+    lr = 5e-4               # 峰值学习率
+    weight_decay = 0.1      # AdamW 权重衰减
+    warmup_iters = 30       # Warmup 步数
+    max_epochs = 200        # 训练轮数
+    grad_clip = 1.0         # 梯度裁剪阈值
+    batch_size = 8          # 批次大小
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# -------------------------- 多头自注意力 --------------------------
-class MultiHeadAttention(nn.Module):
-    def __init__(self):
+
+# ========================== 训练文本 ==========================
+TRAIN_TEXT = r"""The greatest glory in living lies not in never falling, but in rising every time we fall.
+The way to get started is to quit talking and begin doing.
+Life is what happens when you're busy making other plans.
+The future belongs to those who believe in the beauty of their dreams.
+It is during our darkest moments that we must focus to see the light.
+Do not go where the path may lead, go instead where there is no path and leave a trail.
+In the end, it is not the years in your life that count, it is the life in your years.
+Many of life's failures are people who did not realize how close they were to success when they gave up.
+Twenty years from now you will be more disappointed by the things that you did not do than by the ones you did do.
+The only impossible journey is the one you never begin."""
+
+
+# ======================== 1. 字符级 Tokenizer ========================
+class CharTokenizer:
+    """字符级 Tokenizer — 演示用
+    将文本按字符切分，建立字符 ↔ ID 的映射。
+    真实 LLM 使用 BPE / SentencePiece 等子词分词器。
+    """
+    def __init__(self, text):
+        chars = sorted(set(text))
+        self.vocab_size = len(chars)
+        self.stoi = {ch: i for i, ch in enumerate(chars)}  # char → id
+        self.itos = {i: ch for i, ch in enumerate(chars)}  # id → char
+
+    def encode(self, s):
+        """将字符串转为 token ID 列表"""
+        return [self.stoi[c] for c in s]
+
+    def decode(self, ids):
+        """将 token ID 列表还原为字符串"""
+        return ''.join(self.itos[i] for i in ids)
+
+    def __repr__(self):
+        return f"CharTokenizer(vocab_size={self.vocab_size})"
+
+
+# ======================== 2. RMSNorm ========================
+class RMSNorm(nn.Module):
+    """Root Mean Square Layer Normalization
+    相比 LayerNorm 省去了均值计算（居中步骤），
+    是 Llama、Mistral 等现代 LLM 的默认归一化方案。
+    公式: output = x * rsqrt(mean(x²) + eps) * weight
+    """
+    def __init__(self, dim, eps=1e-6):
         super().__init__()
-        self.head_size = embed_dim // n_heads
-        self.qkv = nn.Linear(embed_dim, embed_dim * 3)
-        self.proj = nn.Linear(embed_dim, embed_dim)
-        # 因果掩码，防止看到未来 token
-        self.register_buffer("mask", torch.tril(torch.ones(block_size, block_size)))
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x):
-        B, T, C = x.shape
-        qkv = self.qkv(x).split(embed_dim, dim=-1)
-        q, k, v = qkv
-        # 分头: (B, T, n_heads, head_size) -> (B, n_heads, T, head_size)
-        q = q.view(B, T, n_heads, self.head_size).transpose(1, 2)
-        k = k.view(B, T, n_heads, self.head_size).transpose(1, 2)
-        v = v.view(B, T, n_heads, self.head_size).transpose(1, 2)
+        # x: (B, T, dim)
+        rms = torch.sqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
+        return x / rms * self.weight
 
-        # 注意力分数
-        attn = q @ k.transpose(-2, -1) / (self.head_size ** 0.5)
-        attn = attn.masked_fill(self.mask[:T, :T] == 0, float('-inf'))
-        attn = F.softmax(attn, dim=-1)
-        out = attn @ v
-        out = out.transpose(1, 2).contiguous().view(B, T, C)
-        return self.proj(out)
 
-# -------------------------- Transformer 块 --------------------------
-class Block(nn.Module):
-    def __init__(self):
+# ======================== 3. RoPE 旋转位置编码 ========================
+def precompute_rope_freqs(dim, max_seq_len, theta=10000.0):
+    """预计算 RoPE 的 cos/sin 查找表
+    RoPE 通过旋转矩阵编码位置信息，
+    相比可学习位置嵌入，具有更好的外推能力。
+    """
+    dim = dim // 2  # 每个 pair 共享一个频率
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, dtype=torch.float32) / dim))
+    t = torch.arange(max_seq_len, dtype=torch.float32)
+    freqs = torch.outer(t, freqs)  # (max_seq_len, dim)
+    return freqs.cos(), freqs.sin()  # 各 (max_seq_len, dim)
+
+def apply_rope(x, cos, sin):
+    """对 Q 或 K 应用 RoPE 旋转
+    x:   (B, nh, T, hs) 或 (B, T, D)
+    cos: (T, hs//2)
+    sin: (T, hs//2)
+
+    对每对维度 (x_i, x_{i+hs//2}) 执行二维旋转:
+      x'_i     = x_i * cos - x_{i+hs//2} * sin
+      x'_{i+hs//2} = x_i * sin + x_{i+hs//2} * cos
+    """
+    half = x.shape[-1] // 2
+    x1, x2 = x[..., :half], x[..., half:]
+    cos = cos[:x.shape[-2], ...]  # 截取到当前序列长度
+    sin = sin[:x.shape[-2], ...]
+    # 对齐维度方便广播
+    while cos.dim() < x.dim():
+        cos, sin = cos.unsqueeze(0), sin.unsqueeze(0)
+    x_rotated = torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
+    return x_rotated
+
+
+# ======================== 4. SwiGLU 门控激活 ========================
+class SwiGLU(nn.Module):
+    """Swish-Gated Linear Unit
+    SwiGLU(x) = silu(x @ W_gate) * (x @ W_value)
+    相比 GELU 在相同参数量下效果更好，是 PaLM、Llama 等使用的 FFN 变体。
+
+    实现方式：单个 Linear 输出 2×hidden_dim，
+    然后 chunk 为 gate 和 value 两部分相乘。
+    """
+    def __init__(self, hidden_dim):
         super().__init__()
-        self.attn = MultiHeadAttention()
-        self.ln1 = nn.LayerNorm(embed_dim)
-        self.ln2 = nn.LayerNorm(embed_dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim * 4),
-            nn.GELU(),
-            nn.Linear(embed_dim * 4, embed_dim),
+        self.hidden_dim = hidden_dim
+
+    def forward(self, x):
+        gate, value = x.chunk(2, dim=-1)
+        return F.silu(gate) * value
+
+
+# ======================== 5. 多头自注意力 ========================
+class MultiHeadAttention(nn.Module):
+    """多头自注意力（集成 RoPE + Flash Attention + KV Cache）
+
+    现代 LLM 注意力层的标准实现，包含：
+    - RoPE 位置编码（替代可学习位置嵌入）
+    - PyTorch 2.0 Flash Attention（`scaled_dot_product_attention`）
+    - KV Cache 支持（推理时缓存 K/V 矩阵避免重复计算）
+    - Dropout 正则化
+    """
+    def __init__(self, config: Config):
+        super().__init__()
+        self.n_heads = config.n_heads
+        self.head_dim = config.head_dim
+        self.embed_dim = config.embed_dim
+        self.dropout_p = config.dropout
+
+        # QKV 统一投影
+        self.qkv = nn.Linear(config.embed_dim, config.embed_dim * 3, bias=False)
+        # 输出投影
+        self.proj = nn.Linear(config.embed_dim, config.embed_dim, bias=False)
+
+        # 预计算 RoPE 表
+        cos, sin = precompute_rope_freqs(self.head_dim, config.block_size)
+        self.register_buffer("cos", cos, persistent=False)
+        self.register_buffer("sin", sin, persistent=False)
+
+    def forward(self, x, kv_cache=None):
+        """
+        x: (B, T, embed_dim)
+        kv_cache: {'k': Tensor | None, 'v': Tensor | None} — 推理缓存
+        """
+        B, T, C = x.shape
+
+        # 1) QKV 投影
+        qkv = self.qkv(x).split(self.embed_dim, dim=-1)
+        q, k, v = qkv  # 各 (B, T, embed_dim)
+
+        # 2) 分头: (B, nh, T, hs)
+        q = q.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+        k = k.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+        v = v.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+
+        # 3) RoPE（对 Q 和 K 应用旋转位置编码）
+        q = apply_rope(q, self.cos, self.sin)
+        k = apply_rope(k, self.cos, self.sin)
+
+        # 4) KV Cache
+        if kv_cache is not None:
+            # 首次调用时 cache 为 None，后续调用拼接历史 K/V
+            if kv_cache['k'] is not None:
+                k = torch.cat([kv_cache['k'], k], dim=2)
+                v = torch.cat([kv_cache['v'], v], dim=2)
+            kv_cache['k'] = k
+            kv_cache['v'] = v
+
+        # 5) Flash Attention（PyTorch 2.0 SDPA）
+        # is_causal=True 自动生成上三角因果掩码
+        # 当使用 KV Cache 且 T_q=1 时不需要掩码（已是最新位置）
+        is_causal = (kv_cache is None) and (T > 1)
+        attn_out = F.scaled_dot_product_attention(
+            q, k, v,
+            dropout_p=self.dropout_p if self.training else 0.0,
+            is_causal=is_causal,
         )
 
-    def forward(self, x):
-        x = x + self.attn(self.ln1(x))  # 自注意力 + 残差
-        x = x + self.mlp(self.ln2(x))   # FFN + 残差
+        # 6) 合并头 + 输出投影
+        out = attn_out.transpose(1, 2).contiguous().view(B, T, C)
+        return self.proj(out)
+
+
+# ======================== 6. Transformer 块 ========================
+class TransformerBlock(nn.Module):
+    """Transformer 解码器块
+    Pre-Norm 结构：先归一化再进入子层，残差连接在外。
+    顺序: RMSNorm → Attention → 残差 → RMSNorm → SwiGLU FFN → 残差
+    """
+    def __init__(self, config: Config):
+        super().__init__()
+        self.ln1 = RMSNorm(config.embed_dim)
+        self.ln2 = RMSNorm(config.embed_dim)
+        self.attn = MultiHeadAttention(config)
+
+        # SwiGLU FFN: Linear → SwiGLU → Linear
+        hidden_dim = int(config.embed_dim * 4)
+        self.mlp = nn.Sequential(
+            nn.Linear(config.embed_dim, hidden_dim * 2, bias=False),  # 2× 给 SwiGLU 门控
+            SwiGLU(hidden_dim),
+            nn.Linear(hidden_dim, config.embed_dim, bias=False),
+        )
+        self.dropout = nn.Dropout(config.dropout)
+
+    def forward(self, x, kv_cache=None):
+        x = x + self.dropout(self.attn(self.ln1(x), kv_cache=kv_cache))
+        x = x + self.dropout(self.mlp(self.ln2(x)))
         return x
 
-# -------------------------- 迷你 LLM 主体 (GPT) --------------------------
-class MiniLLM(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.token_emb = nn.Embedding(vocab_size, embed_dim)
-        self.pos_emb = nn.Embedding(block_size, embed_dim)
-        self.blocks = nn.Sequential(*[Block() for _ in range(n_layers)])
-        self.ln_final = nn.LayerNorm(embed_dim)
-        self.head = nn.Linear(embed_dim, vocab_size)
 
-    def forward(self, idx):
+# ======================== 7. MiniLLM 模型 ========================
+class MiniLLM(nn.Module):
+    """迷你 LLM — 现代 GPT 解码器架构
+
+    架构: Token Embedding → N×TransformerBlock → RMSNorm → Linear Head
+    注意：位置信息通过 RoPE 编码（在 Attention 内部），
+    因此不再需要可学习的位置嵌入。
+    """
+    def __init__(self, config: Config, vocab_size: int):
+        super().__init__()
+        self.config = config
+        self.vocab_size = vocab_size
+
+        self.token_emb = nn.Embedding(vocab_size, config.embed_dim)
+        self.blocks = nn.ModuleList([
+            TransformerBlock(config) for _ in range(config.n_layers)
+        ])
+        self.ln_final = RMSNorm(config.embed_dim)
+        self.head = nn.Linear(config.embed_dim, vocab_size, bias=False)
+
+        # 权重初始化（现代 LLM 的标准做法）
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def forward(self, idx, kv_caches=None):
+        """
+        idx: (B, T) token ID 序列
+        kv_caches: list[dict | None] — 各层的 KV 缓存
+        """
         B, T = idx.shape
-        tok_emb = self.token_emb(idx)                             # (B, T, embed_dim)
-        pos_emb = self.pos_emb(torch.arange(T, device=device))    # (T, embed_dim)
-        x = tok_emb + pos_emb
-        x = self.blocks(x)
+        x = self.token_emb(idx)  # (B, T, embed_dim)
+
+        for i, block in enumerate(self.blocks):
+            cache = kv_caches[i] if kv_caches is not None else None
+            x = block(x, kv_cache=cache)
+
         x = self.ln_final(x)
-        logits = self.head(x)     # (B, T, vocab_size)
+        logits = self.head(x)  # (B, T, vocab_size)
         return logits
 
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens):
-        """自回归生成：每次预测下一个 token，拼回去继续预测"""
+    def generate(self, idx, max_new_tokens, use_kv_cache=False, temperature=1.0, top_k=None):
+        """自回归生成文本
+
+        Args:
+            idx: (B, T) 初始 prompt token
+            max_new_tokens: 生成的新 token 数
+            use_kv_cache: 是否使用 KV Cache 加速
+            temperature: 采样温度（>1 更随机，<1 更确定）
+            top_k: 只从概率最高的 k 个 token 中采样
+        """
+        if use_kv_cache:
+            return self._generate_with_cache(idx, max_new_tokens, temperature, top_k)
+        else:
+            return self._generate_no_cache(idx, max_new_tokens, temperature, top_k)
+
+    def _generate_no_cache(self, idx, max_new_tokens, temperature, top_k):
+        """无 KV Cache 的朴素生成（每步重新计算所有位置）"""
         for _ in range(max_new_tokens):
-            idx_crop = idx[:, -block_size:]          # 只取最后 block_size 个 token
-            logits = self(idx_crop)                  # (B, T, vocab_size)
-            logits = logits[:, -1, :]                # 只取最后一个位置的预测
-            probs = F.softmax(logits, dim=-1)        # 转概率
-            next_token = torch.multinomial(probs, num_samples=1)  # 采样
+            idx_crop = idx[:, -self.config.block_size:]
+            logits = self(idx_crop)  # (B, T, vocab_size)
+            logits = logits[:, -1, :] / temperature  # 取最后一位
+
+            # Top-K 采样
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = float('-inf')
+
+            probs = F.softmax(logits, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
             idx = torch.cat((idx, next_token), dim=1)
         return idx
 
+    def _generate_with_cache(self, idx, max_new_tokens, temperature, top_k):
+        """使用 KV Cache 加速生成
+        首次前向处理完整 prompt 并缓存 K/V，
+        后续每步只处理最后 1 个 token。
+        """
+        # 初始化各层的 KV 缓存
+        kv_caches = [{'k': None, 'v': None} for _ in range(self.config.n_layers)]
 
-# -------------------------- 训练一个玩具数据集 --------------------------
-def make_toy_data():
+        generated = idx.clone()
+        B, T = idx.shape
+
+        # 第一步：处理 prompt（完整序列，填充缓存）
+        logits = self(idx, kv_caches=kv_caches)
+        next_logit = logits[:, -1, :] / temperature
+
+        if top_k is not None:
+            v, _ = torch.topk(next_logit, min(top_k, next_logit.size(-1)))
+            next_logit[next_logit < v[:, [-1]]] = float('-inf')
+
+        probs = F.softmax(next_logit, dim=-1)
+        next_token = torch.multinomial(probs, num_samples=1)
+        generated = torch.cat((generated, next_token), dim=1)
+
+        # 后续步骤：每次只送入最后 1 个 token
+        for _ in range(max_new_tokens - 1):
+            logits = self(next_token, kv_caches=kv_caches)  # T=1
+            next_logit = logits[:, -1, :] / temperature
+
+            if top_k is not None:
+                v, _ = torch.topk(next_logit, min(top_k, next_logit.size(-1)))
+                next_logit[next_logit < v[:, [-1]]] = float('-inf')
+
+            probs = F.softmax(next_logit, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
+            generated = torch.cat((generated, next_token), dim=1)
+
+        return generated
+
+
+# ======================== 8. 数据准备 ========================
+def prepare_data(text, tokenizer, config: Config):
+    """将文本切分为重叠的 (input, target) 序列对"""
+    tokens = tokenizer.encode(text)
+    print(f"  文本长度: {len(text)} 字符, {len(tokens)} tokens")
+
+    # 滑动窗口创建序列（50% 重叠）
+    stride = config.block_size // 2
+    seqs = []
+    for i in range(0, len(tokens) - config.block_size, stride):
+        seq = tokens[i:i + config.block_size + 1]
+        seqs.append(seq)
+
+    data = torch.tensor(seqs, dtype=torch.long)
+    x = data[:, :-1]  # 输入
+    y = data[:, 1:]   # 目标（右移一位）
+
+    dataset = TensorDataset(x, y)
+    loader = DataLoader(dataset, batch_size=config.batch_size, shuffle=True)
+    print(f"  生成 {len(dataset)} 条序列, {len(loader)} 批次/轮")
+    return loader
+
+
+# ======================== 9. 学习率调度（Warmup + Cosine） ========================
+class WarmupCosineLR:
+    """学习率 Warmup + Cosine Decay 调度器
+    前 warmup_iters 步线性从 0 升到 peak_lr，
+    后按半余弦曲线衰减到 min_lr。
     """
-    造一组简单的模式供模型学习：
-    - 序列 = [start_id, a, b, a+b, ...] 的循环
-    - 让模型学到"数数"的规律，而不是随机输出
-    """
-    data = []
-    for a in range(1, 11):
-        for b in range(1, 11):
-            seq = [0, a % vocab_size, b % vocab_size, (a + b) % vocab_size]
-            data.append(seq)
-    return torch.tensor(data, dtype=torch.long)
+    def __init__(self, optimizer, warmup_iters, max_iters, peak_lr, min_lr=0):
+        self.optimizer = optimizer
+        self.warmup_iters = warmup_iters
+        self.max_iters = max_iters
+        self.peak_lr = peak_lr
+        self.min_lr = min_lr
+        self.current_lr = 0.0
+
+    def step(self, it):
+        if it < self.warmup_iters:
+            # 线性上升
+            self.current_lr = self.peak_lr * it / max(1, self.warmup_iters)
+        else:
+            # Cosine 衰减
+            progress = (it - self.warmup_iters) / max(1, self.max_iters - self.warmup_iters)
+            self.current_lr = self.min_lr + 0.5 * (self.peak_lr - self.min_lr) * (
+                1 + math.cos(math.pi * progress)
+            )
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = self.current_lr
+
+    def get_lr(self):
+        return self.current_lr
 
 
-# -------------------------- 主程序 --------------------------
-if __name__ == "__main__":
-    model = MiniLLM().to(device)
-    print(f"模型参数量: {sum(p.numel() for p in model.parameters()):,}")
-    print(f"设备: {device}")
+# ======================== 10. 主程序 ========================
+def main():
+    config = Config()
+    print("=" * 60)
+    print("  增强版迷你 LLM — 现代 LLM 技术全演示")
+    print("=" * 60)
 
-    # ---- 1. 先看未训练时生成什么 ----
-    start_tokens = torch.randint(0, vocab_size, (1, 4), device=device)
-    output = model.generate(start_tokens, max_new_tokens=10)
-    print(f"\n[未训练] 生成 token 序列: {output.tolist()[0]}")
+    # ---- 1. 初始化 Tokenizer ----
+    print("\n[1/5] 初始化 Tokenizer...")
+    tokenizer = CharTokenizer(TRAIN_TEXT)
+    print(f"  {tokenizer}")
+    vocab_size = tokenizer.vocab_size
 
-    # ---- 2. 简单训练几步 ----
-    data = make_toy_data()
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    # ---- 2. 创建模型 ----
+    print("\n[2/5] 创建模型...")
+    model = MiniLLM(config, vocab_size).to(config.device)
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"  设备: {config.device}")
+    print(f"  总参数量: {total_params:,} ({total_params/1e3:.1f}K)")
+    print(f"  可训练参数: {trainable_params:,} ({trainable_params/1e3:.1f}K)")
+    print(f"  架构: {config.n_layers} 层 × {config.n_heads} 头, "
+          f"embed_dim={config.embed_dim}, block_size={config.block_size}")
+
+    # ---- 3. 数据准备 ----
+    print("\n[3/5] 准备数据...")
+    train_loader = prepare_data(TRAIN_TEXT, tokenizer, config)
+
+    # ---- 4. 训练 ----
+    print("\n[4/5] 开始训练...")
+
+    # 优化器: AdamW（带解耦权重衰减）
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=config.lr,
+        weight_decay=config.weight_decay,
+        betas=(0.9, 0.95),
+    )
+
+    # 学习率调度器
+    total_iters = config.max_epochs * len(train_loader)
+    scheduler = WarmupCosineLR(
+        optimizer,
+        warmup_iters=config.warmup_iters,
+        max_iters=total_iters,
+        peak_lr=config.lr,
+        min_lr=config.lr * 0.1,
+    )
+
+    # 混合精度（仅 CUDA 时启用）
+    use_amp = (config.device == "cuda")
+    scaler = torch.amp.GradScaler(config.device, enabled=use_amp)
+
     loss_fn = nn.CrossEntropyLoss()
 
-    print(f"\n开始训练（{len(data)} 条玩具数据, 200 轮）...")
+    # 训练循环
     model.train()
-    for epoch in range(200):
-        total_loss = 0.0
-        for seq in data:
-            x = seq[:-1].unsqueeze(0).to(device)      # 输入: [0, a, b]
-            y = seq[1:].unsqueeze(0).to(device)        # 目标: [a, b, a+b]
-            logits = model(x)                          # (1, 3, vocab_size)
-            loss = loss_fn(logits.view(-1, vocab_size), y.view(-1))
+    step = 0
+    for epoch in range(1, config.max_epochs + 1):
+        epoch_loss = 0.0
+        num_batches = 0
+
+        for x, y in train_loader:
+            x, y = x.to(config.device), y.to(config.device)
+
+            # 混合精度前向
+            with torch.amp.autocast(device_type=config.device, enabled=use_amp):
+                logits = model(x)  # (B, T, vocab_size)
+                loss = loss_fn(logits.view(-1, vocab_size), y.view(-1))
+
+            # 反向传播（AMP scaler）
+            scaler.scale(loss).backward()
+
+            # 梯度裁剪
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
+
+            # 更新参数
+            scaler.step(optimizer)
+            scaler.update()
             optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-        if (epoch + 1) % 10 == 0:
-            print(f"  Epoch {epoch+1:2d}, Loss: {total_loss / len(data):.4f}")
 
-    # ---- 3. 训练后生成（用固定 prompt 观察是否学会"数数"）----
+            # 更新学习率
+            scheduler.step(step)
+            step += 1
+
+            epoch_loss += loss.item()
+            num_batches += 1
+
+        avg_loss = epoch_loss / num_batches
+        if epoch % 10 == 0 or epoch == 1 or epoch == config.max_epochs:
+            print(f"  Epoch {epoch:3d}/{config.max_epochs}, "
+                  f"Loss: {avg_loss:.4f}, "
+                  f"LR: {scheduler.get_lr():.6f}")
+
+    # ---- 5. 生成测试 ----
+    print("\n[5/5] 生成测试...")
+
+    # 训练前：用同一个模型（刚初始化时），但我们已经训练完了。
+    # 无法展示"训练前"状态，但可以用一个随机初始化的副本来对比。
+    # 更简单的方式：用训练好的模型生成几个不同 prompt 的结果。
+
     model.eval()
-    test_prompts = [
-        [0, 3, 5],    # 期望学到 3+5=8 → 下一个 token 接近 8
-        [0, 7, 2],    # 7+2=9
-        [0, 4, 9],    # 4+4=8
-    ]
-    print("\n[训练后] 测试生成（prompt=[start, a, b]，看模型能否预测 a+b）:")
-    for prompt in test_prompts:
-        x = torch.tensor([prompt], dtype=torch.long, device=device)
-        out = model.generate(x, max_new_tokens=1)
-        pred = out[0, -1].item()
-        a, b = prompt[1], prompt[2]
-        print(f"  {a} + {b} = {pred}  (期望: {(a+b) % vocab_size})")
 
-    print("\n== 演示结束 ==")
-    print("这个模型只学了简单的加法模式，")
-    print("但它的架构（嵌入 + 多头注意力 + Transformer 解码器）")
-    print("和真正的 GPT 完全一致。")
+    # 测试 prompt（取训练文本的前几个字符）
+    test_prompts = [
+        "The greatest",
+        "The future",
+        "In the end",
+        "Do not go",
+    ]
+
+    print("\n  --- 训练后生成 ---")
+    for prompt in test_prompts:
+        prompt_ids = torch.tensor(
+            [tokenizer.encode(prompt)], dtype=torch.long, device=config.device
+        )
+        out = model.generate(
+            prompt_ids,
+            max_new_tokens=40,
+            use_kv_cache=True,
+            temperature=0.5,
+            top_k=10,
+        )
+        generated_text = tokenizer.decode(out[0].tolist())
+        print(f"\n  Prompt: \"{prompt}\"")
+        print(f"  生成:   {generated_text}")
+
+    # ---- 6. KV Cache 速度对比 ----
+    print("\n  --- KV Cache 速度对比 ---")
+    prompt_ids = torch.tensor(
+        [tokenizer.encode("The")], dtype=torch.long, device=config.device
+    )
+
+    # 无缓存
+    torch.cuda.synchronize() if config.device == "cuda" else None
+    start = time.time()
+    _ = model.generate(prompt_ids, max_new_tokens=100, use_kv_cache=False, temperature=0.5)
+    torch.cuda.synchronize() if config.device == "cuda" else None
+    time_no_cache = time.time() - start
+
+    # 有缓存
+    torch.cuda.synchronize() if config.device == "cuda" else None
+    start = time.time()
+    _ = model.generate(prompt_ids, max_new_tokens=100, use_kv_cache=True, temperature=0.5)
+    torch.cuda.synchronize() if config.device == "cuda" else None
+    time_with_cache = time.time() - start
+
+    print(f"  无 KV Cache: {time_no_cache:.3f}s")
+    print(f"  有 KV Cache: {time_with_cache:.3f}s")
+    print(f"  加速比: {time_no_cache / max(time_with_cache, 1e-6):.1f}x")
+
+    # ---- 总结 ----
+    print("\n" + "=" * 60)
+    print("  演示结束 — 技术清单")
+    print("=" * 60)
+    techniques = [
+        ("CharTokenizer", "字符级分词"),
+        ("RMSNorm", "均方根归一化"),
+        ("RoPE", "旋转位置编码"),
+        ("SwiGLU", "门控激活函数"),
+        ("Flash Attention", "PyTorch 2.0 SDPA"),
+        ("KV Cache", "推理加速缓存"),
+        ("AdamW", "解耦权重衰减优化器"),
+        ("Warmup + Cosine", "学习率调度"),
+        ("Dropout", "正则化"),
+        ("Gradient Clipping", "梯度裁剪"),
+        ("AMP", "混合精度训练"),
+    ]
+    for name, desc in techniques:
+        print(f"  ✓ {name:20s} — {desc}")
+
+
+if __name__ == "__main__":
+    main()
