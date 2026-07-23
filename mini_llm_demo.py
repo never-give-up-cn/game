@@ -463,21 +463,26 @@ class WarmupCosineLR:
 MODEL_PATH = os.path.join(os.path.dirname(__file__) or ".", "mini_llm_checkpoint.pt")
 
 
-def save_checkpoint(model, tokenizer, path=MODEL_PATH):
-    """保存模型权重 + tokenizer 到文件"""
+def save_checkpoint(model, tokenizer, train_text, path=MODEL_PATH):
+    """保存模型权重 + tokenizer + 数据指纹 到文件"""
     checkpoint = {
         'model_state_dict': model.state_dict(),
         'vocab_size': tokenizer.vocab_size,
         'stoi': tokenizer.stoi,
         'itos': tokenizer.itos,
+        'data_hash': hash(train_text),  # 训练文本指纹，用于检测数据是否变更
     }
     torch.save(checkpoint, path)
     print(f"  ✓ 模型已保存到 {path}")
 
 
-def load_checkpoint(path, device='cpu'):
-    """从文件加载模型权重和 tokenizer"""
+def load_checkpoint(path, train_text, device='cpu'):
+    """从文件加载模型权重和 tokenizer，校验数据指纹"""
     checkpoint = torch.load(path, map_location=device, weights_only=True)
+    # 校验训练文本是否一致（数据变了就忽略缓存）
+    if checkpoint.get('data_hash') != hash(train_text):
+        print(f"  ⚠ 训练数据已变更，忽略旧缓存")
+        return None, None
     tokenizer = CharTokenizer.__new__(CharTokenizer)
     tokenizer.vocab_size = checkpoint['vocab_size']
     tokenizer.stoi = checkpoint['stoi']
@@ -513,17 +518,21 @@ def main():
     print(f"  架构: {config.n_layers} 层 × {config.n_heads} 头, "
           f"embed_dim={config.embed_dim}, block_size={config.block_size}")
 
-    # ---- 检查是否有保存的模型 ----
-    checkpoint_exists = os.path.exists(MODEL_PATH)
-    if checkpoint_exists and not args.retrain:
+    # ---- 检查是否有保存的模型 + 训练 ----
+    need_train = True
+    if os.path.exists(MODEL_PATH) and not args.retrain:
         print(f"\n  发现已保存模型 ({MODEL_PATH})，加载中...")
-        state_dict, _ = load_checkpoint(MODEL_PATH, config.device)
-        model.load_state_dict(state_dict)
-        print(f"  ✓ 已加载训练好的模型，跳过训练")
-    else:
-        if args.retrain:
-            print(f"\n  --retrain 参数指定，重新训练...")
+        state_dict, _ = load_checkpoint(MODEL_PATH, TRAIN_TEXT, config.device)
+        if state_dict is not None:
+            model.load_state_dict(state_dict)
+            print(f"  ✓ 已加载训练好的模型，跳过训练")
+            need_train = False
+        else:
+            print(f"  → 训练数据已变更，将重新训练")
+    elif args.retrain:
+        print(f"\n  --retrain 参数指定，重新训练...")
 
+    if need_train:
         # ---- 3. 数据准备 ----
         print("\n[3/5] 准备数据...")
         train_loader = prepare_data(TRAIN_TEXT, tokenizer, config)
@@ -601,8 +610,8 @@ def main():
                       f"Loss: {avg_loss:.4f}, "
                       f"LR: {scheduler.get_lr():.6f}")
 
-        # 训练完成后保存模型
-        save_checkpoint(model, tokenizer)
+        # 训练完成后保存模型到文件（下次启动直接加载）
+        save_checkpoint(model, tokenizer, TRAIN_TEXT)
 
     # ---- 5. 生成测试 ----
     print("\n[5/5] 生成测试...")
