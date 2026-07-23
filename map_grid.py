@@ -83,16 +83,21 @@ class MapGrid:
         self.player = player
 
     def move_player(self, dx: int, dy: int) -> bool:
-        """尝试移动玩家，成功返回 True"""
+        """尝试移动玩家，支持斜向，成功返回 True"""
         if not self.player:
             return False
         new_x = self.player.x + dx
         new_y = self.player.y + dy
-        if self.in_bounds(new_x, new_y) and self.is_free(new_x, new_y):
-            self.player.x = new_x
-            self.player.y = new_y
-            return True
-        return False
+        if not self.in_bounds(new_x, new_y) or not self.is_free(new_x, new_y):
+            return False
+        # 斜向移动时检查中间格（防止穿过墙角）
+        if dx != 0 and dy != 0:
+            if not (self.is_free(self.player.x + dx, self.player.y) and
+                    self.is_free(self.player.x, self.player.y + dy)):
+                return False
+        self.player.x = new_x
+        self.player.y = new_y
+        return True
 
     def render(self) -> List[str]:
         """渲染地图为字符串行列表"""
