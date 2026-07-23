@@ -55,11 +55,11 @@ except ImportError:
 
 # ========================== 超参数 ==========================
 class Config:
-    embed_dim = 128         # 嵌入维度（需整除 n_heads）
+    embed_dim = 192         # 嵌入维度（需整除 n_heads）
     n_heads = 4             # 注意力头数
     head_dim = embed_dim // n_heads  # 每头维度
-    block_size = 128        # 上下文窗口
-    n_layers = 6            # Transformer 层数
+    block_size = 256        # 上下文窗口
+    n_layers = 8            # Transformer 层数
     dropout = 0.1           # Dropout 比例
     lr = 3e-4               # 峰值学习率
     weight_decay = 0.1      # AdamW 权重衰减
@@ -71,9 +71,9 @@ class Config:
 
 
 # ========================== 训练文本 ==========================
-CN_NOVEL_FILE = os.path.join(os.path.dirname(__file__) or ".", "校花的贴身高手.txt")
+CN_NOVEL_FILE = os.path.join(os.path.dirname(__file__) or ".", "cleaned_novel.txt")
 EN_ALICE_FILE = os.path.join(os.path.dirname(__file__) or ".", "alice_in_wonderland.txt")
-MAX_TRAIN_CHARS = 50000  # 截取前 N 字符（None = 全量）
+MAX_TRAIN_CHARS = 200000  # 截取前 N 字符（None = 全量；与 cleaned_novel.txt 长度一致）
 
 
 def _load_training_text():
@@ -661,7 +661,7 @@ def main():
 
         # 早停参数
         best_val_loss = float('inf')
-        patience = 5
+        patience = 10
         stall_count = 0
         best_epoch = 0
 
@@ -767,7 +767,7 @@ def main():
             temperature=0.8,
             top_k=30,
             top_p=0.9,
-            repetition_penalty=1.2,
+            repetition_penalty=1.5,
         )
         generated_text = tokenizer.decode(out[0].tolist())
         print(f"\n  Prompt: \"{prompt}\"")
