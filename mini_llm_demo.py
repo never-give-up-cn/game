@@ -639,12 +639,12 @@ def main():
 
     model.eval()
 
-    # 测试 prompt（取训练文本的前几个字符）
+    # 测试 prompt（从训练文本中选取）
     test_prompts = [
-        "The greatest",
-        "The future",
-        "In the end",
-        "Do not go",
+        "校花的贴身高手",
+        "一个大山里走出来的",
+        "林逸是一名",
+        "内容简介",
     ]
 
     print("\n  --- 训练后生成 ---")
@@ -666,7 +666,7 @@ def main():
     # ---- 6. KV Cache 速度对比 ----
     print("\n  --- KV Cache 速度对比 ---")
     prompt_ids = torch.tensor(
-        [tokenizer.encode("The")], dtype=torch.long, device=config.device
+        [tokenizer.encode("校花的贴身")], dtype=torch.long, device=config.device
     )
 
     # 无缓存
