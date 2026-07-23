@@ -599,8 +599,9 @@ def main():
     need_train = True
     if os.path.exists(MODEL_PATH) and not args.retrain:
         print(f"\n  发现已保存模型 ({MODEL_PATH})，加载中...")
-        state_dict, tokenizer = load_checkpoint(MODEL_PATH, TRAIN_TEXT, config, config.device)
+        state_dict, tokenizer_loaded = load_checkpoint(MODEL_PATH, TRAIN_TEXT, config, config.device)
         if state_dict is not None:
+            tokenizer = tokenizer_loaded  # 只有加载成功才替换 tokenizer
             model.load_state_dict(state_dict)
             print(f"  ✓ 已加载训练好的模型，跳过训练")
             need_train = False
