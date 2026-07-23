@@ -109,14 +109,21 @@ class GameWindow:
         self.show_help = False
 
     def _make_font(self, size: int):
-        """safe font creation"""
-        try:
-            return pygame.font.SysFont("simhei", size)
-        except Exception:
+        """从系统字体文件加载中文字体"""
+        # 直接加载字体文件路径（避免 SysFont 在 pygame 2.6.1 下的 bug）
+        font_paths = [
+            "C:/Windows/Fonts/msyh.ttc",      # 微软雅黑
+            "C:/Windows/Fonts/simhei.ttf",     # 黑体
+            "C:/Windows/Fonts/simsun.ttc",     # 宋体
+            "C:/Windows/Fonts/dengl.ttf",      # 等线
+            "C:/Windows/Fonts/msyhbd.ttc",     # 微软雅黑粗体
+        ]
+        for path in font_paths:
             try:
-                return pygame.font.SysFont("microsoftyahei", size)
+                return pygame.font.Font(path, size)
             except Exception:
-                return pygame.font.Font(None, size)
+                continue
+        return pygame.font.Font(None, size)
 
     def _init_demo_buildings(self):
         for args in [
