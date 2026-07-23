@@ -1,16 +1,22 @@
-# Mini LLM Demo — 极简迷你 GPT
+# Mini LLM Demo — 迷你中文 GPT
 
-一个**纯 CPU 可运行**的极简 GPT 演示项目，从零实现 Transformer 解码器架构，用于理解大语言模型的底层原理。
+从零实现的轻量级 GPT 解码器，**纯 CPU 可运行**，集成现代 LLM 核心技术，
+训练数据为中文网络小说《校花的贴身高手》（鱼人二代）。
 
-## 项目目的
+## 特性
 
-参数量很小（约 **34K**），无法真正流畅对话，**只演示核心原理**：
-
-- Token 嵌入（`nn.Embedding`）
-- 位置编码（可学习的位置嵌入）
-- 多头自注意力（因果掩码）
-- Transformer 解码器块（自注意力 + FFN + 残差连接）
-- 自回归生成（逐个 token 预测）
+- **纯字符级 Tokenizer**（含 `<UNK>` 容错）
+- **RoPE** 旋转位置编码
+- **RMSNorm** 归一化
+- **SwiGLU** 门控激活函数
+- **Flash Attention**（PyTorch 2.0 SDPA）
+- **KV Cache** 推理加速 + 隔离保护
+- **AdamW** + **Warmup + Cosine Decay** 学习率调度
+- **混合精度训练**（AMP，CUDA 自动启用）
+- **Top-K + Top-P** 双重采样 + **重复惩罚**
+- **验证集早停**（10% 数据作验证）
+- **检查点双指纹校验**（数据/超参变更自动重训）
+- **交互式 `--chat` 对话模式**
 
 ## 快速开始
 
@@ -18,55 +24,57 @@
 # 安装依赖
 pip install torch
 
-# 运行
+# 训练并测试
 python mini_llm_demo.py
+
+# 交互式对话
+python mini_llm_demo.py --chat
+
+# 强制重新训练
+python mini_llm_demo.py --retrain
 ```
 
-## 输出示例
+## 架构参数
 
-```
-模型参数量: 34,210
-设备: cpu
+| 组件 | 值 |
+|------|-----|
+| `embed_dim` | 192 |
+| `n_heads` | 4 |
+| `block_size` | 256 |
+| `n_layers` | 8 |
+| 参数量 | ~120 万 |
+| 训练数据 | 清洗后 20 万字小说 |
 
-[未训练] 生成 token 序列: [42, 13, 7, 19, 44, 2, 1, 8, 47, 3, 39, 26, 59, 22]
+## 项目文件
 
-开始训练（100 条玩具数据, 200 轮）...
-  Epoch 10, Loss: 2.5300
-  ...
-  Epoch 200, Loss: 0.0658
-
-[训练后] 测试生成（prompt=[start, a, b]，看模型能否预测 a+b）:
-  3 + 5 = 8  (期望: 8)
-  7 + 2 = 9  (期望: 9)
-  4 + 9 = 13 (期望: 13)
-```
-
-## 架构说明
-
-| 组件 | 说明 |
+| 文件 | 说明 |
 |------|------|
-| `vocab_size=64` | 小型词表 |
-| `embed_dim=32` | 嵌入维度 |
-| `n_heads=2` | 注意力头数 |
-| `block_size=16` | 上下文窗口 |
-| `n_layers=2` | Transformer 层数 |
+| `mini_llm_demo.py` | 主脚本：模型定义、训练、生成 |
+| `preprocess.py` | 文本预处理（去 BOM、去网页残留、过滤短行） |
+| `cleaned_novel.txt` | 清洗后的训练文本（20 万字） |
+| `alice_in_wonderland.txt` | 备选英文训练文本 |
+| `mini_llm_checkpoint.pt` | 训练好的模型检查点（自动管理） |
 
-训练数据为简单的加法模式 `[start, a, b, a+b]`，模型需学会根据前三个 token 预测第四个。
+## 技术清单
 
-## 和真实 GPT 的相同与不同
-
-**相同：**
-- 同样的 Transformer 解码器架构
-- 同样的多头因果自注意力
-- 同样的自回归生成流程（采样而非 argmax）
-
-**不同：**
-- 词表大小 64 vs 真实 GPT 的 50K+
-- 参数量 34K vs GPT-3 的 175B
-- 上下文窗口 16 vs 真实模型的 8K~128K
-- 没有预训练语料，仅玩具数据
+- CharTokenizer + UNK 容错
+- RMSNorm（Root Mean Square Layer Normalization）
+- RoPE 旋转位置编码
+- SwiGLU 门控激活函数
+- Flash Attention（PyTorch `scaled_dot_product_attention`）
+- KV Cache + 调用隔离
+- Top-K + Top-P 双重采样
+- 重复惩罚（Repetition Penalty）
+- AdamW 解耦权重衰减
+- Warmup + Cosine Decay 学习率调度
+- Dropout 正则化
+- 梯度裁剪（Gradient Clipping）
+- 混合精度训练（AMP）
+- 验证集早停（Patience=10）
+- 检查点数据指纹 + 超参指纹
 
 ## 依赖
 
 - Python 3.8+
-- PyTorch（CPU 版即可）
+- PyTorch 2.0+（CPU 版即可）
+- `tqdm`（可选，无则自动降级）
