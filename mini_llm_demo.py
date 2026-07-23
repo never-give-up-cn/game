@@ -20,7 +20,7 @@
   ✓ 混合精度训练（AMP，仅 CUDA 时启用）
 """
 
-import io, sys, time, math
+import io, os, sys, time, math, argparse
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 import torch
@@ -522,9 +522,38 @@ class WarmupCosineLR:
         return self.current_lr
 
 
+MODEL_PATH = os.path.join(os.path.dirname(__file__) or ".", "mini_llm_checkpoint.pt")
+
+
+def save_checkpoint(model, tokenizer, path=MODEL_PATH):
+    """保存模型权重 + tokenizer 到文件"""
+    checkpoint = {
+        'model_state_dict': model.state_dict(),
+        'vocab_size': tokenizer.vocab_size,
+        'stoi': tokenizer.stoi,
+        'itos': tokenizer.itos,
+    }
+    torch.save(checkpoint, path)
+    print(f"  ✓ 模型已保存到 {path}")
+
+
+def load_checkpoint(path, device='cpu'):
+    """从文件加载模型权重和 tokenizer"""
+    checkpoint = torch.load(path, map_location=device, weights_only=True)
+    tokenizer = CharTokenizer.__new__(CharTokenizer)
+    tokenizer.vocab_size = checkpoint['vocab_size']
+    tokenizer.stoi = checkpoint['stoi']
+    tokenizer.itos = {int(k): v for k, v in checkpoint['itos'].items()}
+    return checkpoint['model_state_dict'], tokenizer
+
+
 # ======================== 10. 主程序 ========================
 def main():
     config = Config()
+    parser = argparse.ArgumentParser(description="迷你 LLM 演示")
+    parser.add_argument('--retrain', action='store_true',
+                        help='强制重新训练（默认：已有检查点时跳过训练）')
+    args = parser.parse_args()
     print("=" * 60)
     print("  增强版迷你 LLM — 现代 LLM 技术全演示")
     print("=" * 60)
@@ -546,82 +575,96 @@ def main():
     print(f"  架构: {config.n_layers} 层 × {config.n_heads} 头, "
           f"embed_dim={config.embed_dim}, block_size={config.block_size}")
 
-    # ---- 3. 数据准备 ----
-    print("\n[3/5] 准备数据...")
-    train_loader = prepare_data(TRAIN_TEXT, tokenizer, config)
+    # ---- 检查是否有保存的模型 ----
+    checkpoint_exists = os.path.exists(MODEL_PATH)
+    if checkpoint_exists and not args.retrain:
+        print(f"\n  发现已保存模型 ({MODEL_PATH})，加载中...")
+        state_dict, _ = load_checkpoint(MODEL_PATH, config.device)
+        model.load_state_dict(state_dict)
+        print(f"  ✓ 已加载训练好的模型，跳过训练")
+    else:
+        if args.retrain:
+            print(f"\n  --retrain 参数指定，重新训练...")
 
-    # ---- 4. 训练 ----
-    print("\n[4/5] 开始训练...")
+        # ---- 3. 数据准备 ----
+        print("\n[3/5] 准备数据...")
+        train_loader = prepare_data(TRAIN_TEXT, tokenizer, config)
 
-    # 优化器: AdamW（带解耦权重衰减）
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=config.lr,
-        weight_decay=config.weight_decay,
-        betas=(0.9, 0.95),
-    )
+        # ---- 4. 训练 ----
+        print("\n[4/5] 开始训练...")
 
-    # 学习率调度器
-    total_iters = config.max_epochs * len(train_loader)
-    scheduler = WarmupCosineLR(
-        optimizer,
-        warmup_iters=config.warmup_iters,
-        max_iters=total_iters,
-        peak_lr=config.lr,
-        min_lr=config.lr * 0.1,
-    )
+        # 优化器: AdamW（带解耦权重衰减）
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr=config.lr,
+            weight_decay=config.weight_decay,
+            betas=(0.9, 0.95),
+        )
 
-    # 混合精度（仅 CUDA 时启用）
-    use_amp = (config.device == "cuda")
-    scaler = torch.amp.GradScaler(config.device, enabled=use_amp)
+        # 学习率调度器
+        total_iters = config.max_epochs * len(train_loader)
+        scheduler = WarmupCosineLR(
+            optimizer,
+            warmup_iters=config.warmup_iters,
+            max_iters=total_iters,
+            peak_lr=config.lr,
+            min_lr=config.lr * 0.1,
+        )
 
-    loss_fn = nn.CrossEntropyLoss()
+        # 混合精度（仅 CUDA 时启用）
+        use_amp = (config.device == "cuda")
+        scaler = torch.amp.GradScaler(config.device, enabled=use_amp)
 
-    # 训练循环
-    model.train()
-    step = 0
-    overall_pct_interval = max(1, total_iters // 100)
-    for epoch in range(1, config.max_epochs + 1):
-        epoch_loss = 0.0
-        num_batches = 0
+        loss_fn = nn.CrossEntropyLoss()
 
-        for x, y in tqdm(train_loader, desc=f"  Epoch {epoch:3d}/{config.max_epochs}", leave=False):
-            x, y = x.to(config.device), y.to(config.device)
+        # 训练循环
+        model.train()
+        step = 0
+        overall_pct_interval = max(1, total_iters // 100)
+        for epoch in range(1, config.max_epochs + 1):
+            epoch_loss = 0.0
+            num_batches = 0
 
-            # 混合精度前向
-            with torch.amp.autocast(device_type=config.device, enabled=use_amp):
-                logits = model(x)  # (B, T, vocab_size)
-                loss = loss_fn(logits.view(-1, vocab_size), y.view(-1))
+            for x, y in tqdm(train_loader, desc=f"  Epoch {epoch:3d}/{config.max_epochs}", leave=False):
+                x, y = x.to(config.device), y.to(config.device)
 
-            # 反向传播（AMP scaler）
-            scaler.scale(loss).backward()
+                # 混合精度前向
+                with torch.amp.autocast(device_type=config.device, enabled=use_amp):
+                    logits = model(x)  # (B, T, vocab_size)
+                    loss = loss_fn(logits.view(-1, vocab_size), y.view(-1))
 
-            # 梯度裁剪
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
+                # 反向传播（AMP scaler）
+                scaler.scale(loss).backward()
 
-            # 更新参数
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad()
+                # 梯度裁剪
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
 
-            # 更新学习率
-            scheduler.step(step)
-            step += 1
+                # 更新参数
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
 
-            # 显示总体训练百分比
-            if step % overall_pct_interval == 0:
-                overall_pct = step / total_iters * 100
-                print(f"    总体训练进度: {overall_pct:.1f}%")
+                # 更新学习率
+                scheduler.step(step)
+                step += 1
 
-            epoch_loss += loss.item()
-            num_batches += 1
+                # 显示总体训练百分比
+                if step % overall_pct_interval == 0:
+                    overall_pct = step / total_iters * 100
+                    print(f"    总体训练进度: {overall_pct:.1f}%")
 
-        avg_loss = epoch_loss / num_batches
-        if epoch % 10 == 0 or epoch == 1 or epoch == config.max_epochs:
-            print(f"    Epoch {epoch:3d}/{config.max_epochs} ({epoch/config.max_epochs*100:.0f}%), "
-                  f"Loss: {avg_loss:.4f}, "
-                  f"LR: {scheduler.get_lr():.6f}")
+                epoch_loss += loss.item()
+                num_batches += 1
+
+            avg_loss = epoch_loss / num_batches
+            if epoch % 10 == 0 or epoch == 1 or epoch == config.max_epochs:
+                print(f"    Epoch {epoch:3d}/{config.max_epochs} ({epoch/config.max_epochs*100:.0f}%), "
+                      f"Loss: {avg_loss:.4f}, "
+                      f"LR: {scheduler.get_lr():.6f}")
+
+        # 训练完成后保存模型
+        save_checkpoint(model, tokenizer)
 
     # ---- 5. 生成测试 ----
     print("\n[5/5] 生成测试...")
