@@ -57,41 +57,58 @@ class Config:
     lr = 5e-4               # 峰值学习率
     weight_decay = 0.1      # AdamW 权重衰减
     warmup_iters = 30       # Warmup 步数
-    max_epochs = 200        # 训练轮数
+    max_epochs = 30         # 训练轮数
     grad_clip = 1.0         # 梯度裁剪阈值
     batch_size = 8          # 批次大小
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 # ========================== 训练文本 ==========================
-ALICE_FILE = os.path.join(os.path.dirname(__file__) or ".", "alice_in_wonderland.txt")
+CN_NOVEL_FILE = os.path.join(os.path.dirname(__file__) or ".", "校花的贴身高手.txt")
+EN_ALICE_FILE = os.path.join(os.path.dirname(__file__) or ".", "alice_in_wonderland.txt")
+MAX_TRAIN_CHARS = 50000  # 截取前 N 字符（None = 全量）
+
 
 def _load_training_text():
-    """从文件加载训练文本，剔除 Project Gutenberg 的页眉页脚"""
-    try:
-        text = open(ALICE_FILE, 'r', encoding='utf-8').read()
-    except FileNotFoundError:
-        print(f"  ⚠ 未找到 {ALICE_FILE}，使用默认简短文本")
-        return (
-            "Alice was beginning to get very tired of sitting by her sister on the bank, "
-            "and of having nothing to do: once or twice she had peeped into the book her "
-            "sister was reading, but it had no pictures or conversations in it, "
-            "\"and what is the use of a book,\" thought Alice \"without pictures or conversations?\""
-        )
-    # 截取正文：去除 Gutenberg 页眉/页脚标记
-    start = text.find("*** START")
-    end = text.find("*** END")
-    if start != -1:
-        text = text[start:]
-    if end != -1:
-        text = text[:end]
-    # 去掉开头的 *** START ... *** 行
-    first_content = text.find("***")
-    if first_content != -1:
-        # 跳过第一行 *** START ... ***
-        text = text[first_content:]
-        text = text.split("\n", 1)[-1] if "\n" in text else text
-    return text.strip()
+    """依次尝试加载中文小说 → 英文爱丽丝 → 默认回退"""
+
+    # 1) 优先加载中文小说
+    if os.path.exists(CN_NOVEL_FILE):
+        print(f"  ✓ 加载中文训练文本: {CN_NOVEL_FILE}")
+        text = open(CN_NOVEL_FILE, 'r', encoding='utf-8').read()
+        # 去掉 BOM
+        if text.startswith('﻿'):
+            text = text[1:]
+        if MAX_TRAIN_CHARS is not None and len(text) > MAX_TRAIN_CHARS:
+            print(f"  文本过长 ({len(text):,} 字符)，截取前 {MAX_TRAIN_CHARS:,} 字符")
+            text = text[:MAX_TRAIN_CHARS]
+        return text.strip()
+
+    # 2) 回退：英文爱丽丝漫游仙境
+    if os.path.exists(EN_ALICE_FILE):
+        print(f"  ✓ 加载英文训练文本: {EN_ALICE_FILE}")
+        text = open(EN_ALICE_FILE, 'r', encoding='utf-8').read()
+        start = text.find("*** START")
+        end = text.find("*** END")
+        if start != -1:
+            text = text[start:]
+        if end != -1:
+            text = text[:end]
+        first_content = text.find("***")
+        if first_content != -1:
+            text = text[first_content:]
+            text = text.split("\n", 1)[-1] if "\n" in text else text
+        return text.strip()
+
+    # 3) 最终回退
+    print(f"  ⚠ 未找到训练文本文件，使用默认简短文本")
+    return (
+        "Alice was beginning to get very tired of sitting by her sister on the bank, "
+        "and of having nothing to do: once or twice she had peeped into the book her "
+        "sister was reading, but it had no pictures or conversations in it, "
+        "\"and what is the use of a book,\" thought Alice \"without pictures or conversations?\""
+    )
+
 
 TRAIN_TEXT = _load_training_text()
 
