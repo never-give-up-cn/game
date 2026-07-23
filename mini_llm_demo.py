@@ -59,7 +59,8 @@ class Config:
     n_heads = 4             # 注意力头数
     n_kv_heads = 2          # KV 头数（GQA: < n_heads 时可减少缓存）
     head_dim = embed_dim // n_heads  # 每头维度
-    block_size = 256        # 上下文窗口
+    block_size = 256        # 上下文窗口（滑动窗口模式下可设 2048+，NTK-RoPE 支持外推）
+    sliding_window = None   # 滑动窗口（None=全局注意，int=每 token 只看前 W 个，支持更长上下文）
     n_layers = 8            # Transformer 层数
     dropout = 0.1           # Dropout 比例
     lr = 3e-4               # 峰值学习率
@@ -170,16 +171,24 @@ class RMSNorm(nn.Module):
 
 
 # ======================== 3. RoPE 旋转位置编码 ========================
-def precompute_rope_freqs(dim, max_seq_len, theta=10000.0):
+def precompute_rope_freqs(dim, max_seq_len, theta=10000.0, scale=1.0):
     """预计算 RoPE 的 cos/sin 查找表
     RoPE 通过旋转矩阵编码位置信息，
     相比可学习位置嵌入，具有更好的外推能力。
+
+    Args:
+        scale: NTK-aware 缩放因子。大于 1 时扩展频率范围，
+               使模型在更长序列上保持位置区分度。
+               scale = 目标长度 / 训练长度
     """
-    dim = dim // 2  # 每个 pair 共享一个频率
+    dim = dim // 2
+    # NTK-aware theta 缩放：保持高频细节，拉伸低频
+    if scale > 1.0:
+        theta = theta * (scale ** (dim / (dim - 1)))
     freqs = 1.0 / (theta ** (torch.arange(0, dim, dtype=torch.float32) / dim))
     t = torch.arange(max_seq_len, dtype=torch.float32)
-    freqs = torch.outer(t, freqs)  # (max_seq_len, dim)
-    return freqs.cos(), freqs.sin()  # 各 (max_seq_len, dim)
+    freqs = torch.outer(t, freqs)
+    return freqs.cos(), freqs.sin()
 
 def apply_rope(x, cos, sin):
     """对 Q 或 K 应用 RoPE 旋转
@@ -252,8 +261,10 @@ class GroupedQueryAttention(nn.Module):
 
         # 每组 Q 头数（用于将 KV 头重复广播到 Q 头数）
         self.n_rep = self.n_heads // self.n_kv_heads
+        # 滑动窗口（None=全局注意，int=窗口大小）
+        self.sliding_window = getattr(config, 'sliding_window', None)
 
-        cos, sin = precompute_rope_freqs(self.head_dim, config.block_size)
+        cos, sin = precompute_rope_freqs(self.head_dim, config.block_size * 2)  # 预计算 2 倍位置，支持外推
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
 
@@ -273,13 +284,15 @@ class GroupedQueryAttention(nn.Module):
         k = self.k_proj(x).view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
 
-        # 2) RoPE（Q 全量头，K 仅 kv 头，节省计算）
+        # 2) RoPE
         q = apply_rope(q, self.cos, self.sin)
         k = apply_rope(k, self.cos, self.sin)
 
         # 3) KV Cache
+        cache_len = 0
         if kv_cache is not None:
             if kv_cache['k'] is not None:
+                cache_len = kv_cache['k'].shape[2]
                 k = torch.cat([kv_cache['k'], k], dim=2)
                 v = torch.cat([kv_cache['v'], v], dim=2)
             kv_cache['k'] = k
@@ -289,10 +302,35 @@ class GroupedQueryAttention(nn.Module):
         k = self._repeat_kv(k, self.n_rep)
         v = self._repeat_kv(v, self.n_rep)
 
-        # 5) Flash Attention
-        is_causal = (kv_cache is None) and (T > 1)
+        # 5) 构建注意力掩码（支持滑动窗口）
+        attn_mask = None
+        if kv_cache is not None:
+            # 推理阶段：Q=T_q=1, K=T_k=cache_len+1
+            # 只用因果掩码（最新 token 看所有缓存）
+            is_causal = False
+            if hasattr(self, 'sliding_window') and self.sliding_window is not None:
+                # 滑动窗口：只保留最近 W 个位置
+                kv_len = k.shape[2]
+                if kv_len > self.sliding_window:
+                    k = k[:, :, -self.sliding_window:]
+                    v = v[:, :, -self.sliding_window:]
+        elif T > 1:
+            # 训练阶段：构建 (T, T) 掩码
+            if hasattr(self, 'sliding_window') and self.sliding_window is not None:
+                mask = torch.full((T, T), float('-inf'), device=x.device, dtype=q.dtype)
+                for i in range(T):
+                    lo = max(0, i - self.sliding_window + 1)
+                    mask[i, lo:i+1] = 0.0
+                attn_mask = mask
+                is_causal = False
+            else:
+                is_causal = True
+        else:
+            is_causal = False
+
         attn_out = F.scaled_dot_product_attention(
             q, k, v,
+            attn_mask=attn_mask,
             dropout_p=self.dropout_p if self.training else 0.0,
             is_causal=is_causal,
         )
