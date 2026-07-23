@@ -141,9 +141,21 @@ class GameWindow:
                 self._confirm_place()
         elif self.placing:
             self._place_key(key)
-        # 移动按键：设置初始快速响应标记
-        elif key in (pygame.K_w, pygame.K_s, pygame.K_a, pygame.K_d,
-                     pygame.K_UP, pygame.K_DOWN, pygame.K_LEFT, pygame.K_RIGHT):
+        elif key in (pygame.K_w, pygame.K_UP, pygame.K_s, pygame.K_DOWN,
+                     pygame.K_a, pygame.K_LEFT, pygame.K_d, pygame.K_RIGHT):
+            # 按键即时移动一步（只朝该方向）
+            dx = dy = 0
+            if key in (pygame.K_w, pygame.K_UP):
+                dy = -1
+            elif key in (pygame.K_s, pygame.K_DOWN):
+                dy = 1
+            elif key in (pygame.K_a, pygame.K_LEFT):
+                dx = -1
+            elif key in (pygame.K_d, pygame.K_RIGHT):
+                dx = 1
+            if dx != 0 or dy != 0:
+                self.game_map.move_player(dx, dy)
+            # 启用长按连续移动
             self.move_initial = True
             self.move_timer = 0
 
