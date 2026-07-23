@@ -67,6 +67,7 @@ class Config:
     max_epochs = 50         # 训练轮数
     grad_clip = 1.0         # 梯度裁剪阈值
     batch_size = 8          # 批次大小
+    gradient_accumulation_steps = 4  # 梯度累积步数（等效 batch = batch_size × accum）
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
@@ -180,16 +181,23 @@ def precompute_rope_freqs(dim, max_seq_len, theta=10000.0):
 def apply_rope(x, cos, sin):
     """对 Q 或 K 应用 RoPE 旋转
     x:   (B, nh, T, hs) 或 (B, T, D)
-    cos: (T, hs//2)   — 预计算表，需确保 T ≤ cos.size(0)
+    cos: (T, hs//2)   — 预计算表
     sin: (T, hs//2)
+    若序列长度超过预计算表，自动扩展 RoPE 频率表。
     """
     half = x.shape[-1] // 2
     x1, x2 = x[..., :half], x[..., half:]
     seq_len = x.shape[-2]
-    # 防越界保护：如果序列长度超过预计算表，截断序列
+
+    # 越界时扩展 RoPE 表（线性外推）
     if seq_len > cos.size(0):
-        x1, x2 = x1[..., :cos.size(0), :], x2[..., :cos.size(0), :]
-        seq_len = cos.size(0)
+        print(f"  ⚠ RoPE 表大小 {cos.size(0)} < 序列长度 {seq_len}，自动扩展")
+        # NTK-aware 外推：增大 theta 以扩展
+        scale = seq_len / cos.size(0)
+        new_cos = torch.cat([cos, cos[-1:].repeat(seq_len - cos.size(0), 1)], dim=0)
+        new_sin = torch.cat([sin, sin[-1:].repeat(seq_len - sin.size(0), 1)], dim=0)
+        cos, sin = new_cos, new_sin
+
     cos_ = cos[:seq_len, ...]
     sin_ = sin[:seq_len, ...]
     while cos_.dim() < x.dim():
@@ -198,19 +206,21 @@ def apply_rope(x, cos, sin):
     return x_rotated
 
 
-# ======================== 4. SwiGLU 门控激活 ========================
-class SwiGLU(nn.Module):
-    """Swish-Gated Linear Unit
-    SwiGLU(x) = silu(x @ W_gate) * (x @ W_value)
+# ======================== 4. SwiGLU FFN ========================
+class SwiGLUFFN(nn.Module):
+    """SwiGLU 门控前馈网络
+    SwiGLU(x) = silu(x @ W_gate) * (x @ W_up) @ W_down
     相比 GELU 在相同参数量下效果更好，是 PaLM、Llama 等使用的 FFN 变体。
+    使用独立的 gate/up 投影（不共用 Linear），语义更清晰。
     """
-    def __init__(self, hidden_dim):
+    def __init__(self, dim, hidden_dim):
         super().__init__()
-        self.hidden_dim = hidden_dim
+        self.gate_proj = nn.Linear(dim, hidden_dim, bias=False)
+        self.up_proj = nn.Linear(dim, hidden_dim, bias=False)
+        self.down_proj = nn.Linear(hidden_dim, dim, bias=False)
 
     def forward(self, x):
-        gate, value = x.chunk(2, dim=-1)
-        return F.silu(gate) * value
+        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
 
 
 # ======================== 5. 多头自注意力 ========================
@@ -283,11 +293,7 @@ class TransformerBlock(nn.Module):
         self.attn = MultiHeadAttention(config)
 
         hidden_dim = int(config.embed_dim * 4)
-        self.mlp = nn.Sequential(
-            nn.Linear(config.embed_dim, hidden_dim * 2, bias=False),
-            SwiGLU(hidden_dim),
-            nn.Linear(hidden_dim, config.embed_dim, bias=False),
-        )
+        self.mlp = SwiGLUFFN(config.embed_dim, hidden_dim)
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x, kv_cache=None):
@@ -310,6 +316,10 @@ class MiniLLM(nn.Module):
         ])
         self.ln_final = RMSNorm(config.embed_dim)
         self.head = nn.Linear(config.embed_dim, vocab_size, bias=False)
+
+        # 权重共享（Tie Embedding）：embed 和 head 共用权重
+        # 标准实践，可减少参数量并提升训练稳定性
+        self.head.weight = self.token_emb.weight
 
         self.apply(self._init_weights)
 
@@ -355,7 +365,7 @@ class MiniLLM(nn.Module):
         idx = idx[:, -self.config.block_size:]
 
         # 温度下限保护
-        temperature = max(temperature, 1e-5)
+        temperature = max(temperature, 1e-2)
 
         if use_kv_cache:
             return self._generate_with_cache(idx, max_new_tokens, temperature, top_k, top_p, repetition_penalty)
@@ -363,12 +373,14 @@ class MiniLLM(nn.Module):
             return self._generate_no_cache(idx, max_new_tokens, temperature, top_k, top_p, repetition_penalty)
 
     @staticmethod
-    def _sample(logits, temperature, top_k, top_p, prev_token_ids=None, repetition_penalty=1.0):
-        """统一的采样逻辑：重复惩罚 → 温度缩放 → Top-K → Top-P → 采样"""
-        # 重复惩罚
-        if repetition_penalty != 1.0 and prev_token_ids is not None and len(prev_token_ids) > 0:
-            for tid in prev_token_ids:
-                logits[:, tid] /= repetition_penalty
+    def _sample(logits, temperature, top_k, top_p, prev_token_mask=None, repetition_penalty=1.0):
+        """统一的采样逻辑：重复惩罚 → 温度缩放 → Top-K → Top-P → 采样
+        prev_token_mask: (1, vocab_size) 的 bool mask，已生成位置为 True
+        """
+        # 重复惩罚（tensor 操作，避免 Python 循环）
+        if repetition_penalty != 1.0 and prev_token_mask is not None:
+            logits = logits.clone()
+            logits[prev_token_mask] /= repetition_penalty
 
         logits = logits / temperature
 
@@ -396,12 +408,15 @@ class MiniLLM(nn.Module):
     def _generate_no_cache(self, idx, max_new_tokens, temperature, top_k, top_p, repetition_penalty):
         """无 KV Cache 的朴素生成（每步重新计算所有位置）"""
         generated = idx.clone()
+        vocab_size = self.vocab_size
         for _ in range(max_new_tokens):
             idx_crop = generated[:, -self.config.block_size:]
             logits = self(idx_crop)
             logits = logits[:, -1, :]
-            prev_ids = set(generated[0].tolist())
-            next_token = self._sample(logits, temperature, top_k, top_p, prev_ids, repetition_penalty)
+            # 重复惩罚 mask（tensor 操作）
+            prev_mask = torch.zeros(1, vocab_size, dtype=torch.bool, device=logits.device)
+            prev_mask.scatter_(1, generated, True)
+            next_token = self._sample(logits, temperature, top_k, top_p, prev_mask, repetition_penalty)
             generated = torch.cat((generated, next_token), dim=1)
         return generated
 
@@ -412,19 +427,21 @@ class MiniLLM(nn.Module):
         kv_caches = [{'k': None, 'v': None} for _ in range(self.config.n_layers)]
 
         generated = idx.clone()
-        B, T = idx.shape
+        vocab_size = self.vocab_size
 
         # 第一步：处理 prompt（完整序列，填充缓存）
         logits = self(idx, kv_caches=kv_caches)
-        prev_ids = set(generated[0].tolist())
-        next_token = self._sample(logits[:, -1, :], temperature, top_k, top_p, prev_ids, repetition_penalty)
+        prev_mask = torch.zeros(1, vocab_size, dtype=torch.bool, device=logits.device)
+        prev_mask.scatter_(1, generated, True)
+        next_token = self._sample(logits[:, -1, :], temperature, top_k, top_p, prev_mask, repetition_penalty)
         generated = torch.cat((generated, next_token), dim=1)
 
         # 后续步骤：每次只送入最后 1 个 token
         for _ in range(max_new_tokens - 1):
-            logits = self(next_token, kv_caches=kv_caches)  # T=1
-            prev_ids = set(generated[0].tolist())
-            next_token = self._sample(logits[:, -1, :], temperature, top_k, top_p, prev_ids, repetition_penalty)
+            logits = self(next_token, kv_caches=kv_caches)
+            prev_mask = torch.zeros(1, vocab_size, dtype=torch.bool, device=logits.device)
+            prev_mask.scatter_(1, generated, True)
+            next_token = self._sample(logits[:, -1, :], temperature, top_k, top_p, prev_mask, repetition_penalty)
             generated = torch.cat((generated, next_token), dim=1)
 
         return generated
@@ -437,33 +454,33 @@ def prepare_data(text, tokenizer, config: Config, val_split=0.1):
     Returns:
         train_loader, val_loader — 验证集为 None 当数据量不足时
     """
-    tokens = tokenizer.encode(text)
+    tokens = torch.tensor(tokenizer.encode(text), dtype=torch.long)
     print(f"  文本长度: {len(text)} 字符, {len(tokens)} tokens")
 
     stride = config.block_size // 2
-    max_start = len(tokens) - config.block_size
+    n = len(tokens)
+
+    # 边界保护
+    if n < config.block_size + 1:
+        print(f"  ⚠ 文本不足一条序列 ({n} tokens)，自动填充")
+        tokens = F.pad(tokens, (0, config.block_size + 1 - n))
+        n = len(tokens)
+
+    max_start = n - config.block_size
     if max_start <= 0:
-        print(f"  ⚠ 文本不足一条序列 ({len(tokens)} tokens)，自动填充")
-        pad_len = config.block_size + 1 - len(tokens)
-        tokens = tokens + [0] * max(0, pad_len)
         max_start = 1
 
-    seqs = []
-    for i in range(0, max_start, stride):
-        seq = tokens[i:i + config.block_size + 1]
-        seqs.append(seq)
+    # 向量化生成滑动窗口序列 (num_seqs, block_size+1)
+    indices = torch.arange(config.block_size + 1).unsqueeze(0) +               torch.arange(0, max_start, stride).unsqueeze(1)
+    data = tokens[indices]  # (num_seqs, block_size+1)
 
-    if not seqs:
-        seqs.append(tokens[:config.block_size + 1])
-
-    data = torch.tensor(seqs, dtype=torch.long)
-    x = data[:, :-1]
-    y = data[:, 1:]
+    x = data[:, :-1]  # 输入
+    y = data[:, 1:]   # 目标
 
     # 训练/验证分割
-    n = len(x)
-    n_val = max(1, int(n * val_split))
-    n_train = n - n_val
+    n_total = len(x)
+    n_val = max(1, int(n_total * val_split))
+    n_train = n_total - n_val
 
     train_dataset = TensorDataset(x[:n_train], y[:n_train])
     train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
@@ -473,7 +490,7 @@ def prepare_data(text, tokenizer, config: Config, val_split=0.1):
         val_dataset = TensorDataset(x[n_train:], y[n_train:])
         val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
 
-    print(f"  生成 {n} 条序列, 训练 {n_train} 条 / 验证 {n_val} 条")
+    print(f"  生成 {n_total} 条序列, 训练 {n_train} 条 / 验证 {n_val} 条")
     return train_loader, val_loader
 
 
@@ -668,33 +685,36 @@ def main():
         model.train()
         step = 0
         overall_pct_interval = max(1, total_iters // 100)
+        accum_steps = config.gradient_accumulation_steps
         for epoch in range(1, config.max_epochs + 1):
             epoch_loss = 0.0
             num_batches = 0
 
-            for x, y in tqdm(train_loader, desc=f"  Epoch {epoch:3d}/{config.max_epochs}", leave=False):
+            for micro_idx, (x, y) in enumerate(tqdm(train_loader, desc=f"  Epoch {epoch:3d}/{config.max_epochs}", leave=False)):
                 x, y = x.to(config.device), y.to(config.device)
 
                 with torch.amp.autocast(device_type=config.device, enabled=use_amp):
                     logits = model(x)
-                    loss = loss_fn(logits.view(-1, vocab_size), y.view(-1))
+                    loss = loss_fn(logits.view(-1, vocab_size), y.view(-1)) / accum_steps
 
                 scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
 
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad()
+                # 每 accum_steps 步更新一次参数
+                if (micro_idx + 1) % accum_steps == 0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), config.grad_clip)
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad()
 
-                scheduler.step(step)
-                step += 1
+                    scheduler.step(step)
+                    step += 1
 
-                if step % overall_pct_interval == 0:
-                    overall_pct = step / total_iters * 100
-                    print(f"    总体训练进度: {overall_pct:.1f}%")
+                    if step % overall_pct_interval == 0:
+                        overall_pct = step / total_iters * 100
+                        print(f"    总体训练进度: {overall_pct:.1f}%")
 
-                epoch_loss += loss.item()
+                epoch_loss += loss.item() * accum_steps
                 num_batches += 1
 
             avg_loss = epoch_loss / num_batches
