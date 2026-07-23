@@ -28,6 +28,24 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
+try:
+    from tqdm import tqdm
+except ImportError:
+    # 简单回退：逐行输出进度
+    def tqdm(iterable, desc="", **kwargs):
+        total = kwargs.get('total') or (len(iterable) if hasattr(iterable, '__len__') else None)
+        if total:
+            print(f"  {desc}: 0/{total} (0%)")
+            for i, item in enumerate(iterable):
+                cur = i + 1
+                if cur % max(1, total // 10) == 0 or cur == total:
+                    print(f"\r  {desc}: {cur}/{total} ({cur*100//total}%)", end="", flush=True)
+                yield item
+            print()
+        else:
+            for item in iterable:
+                yield item
+
 # ========================== 超参数 ==========================
 class Config:
     embed_dim = 64          # 嵌入维度
@@ -562,11 +580,12 @@ def main():
     # 训练循环
     model.train()
     step = 0
+    overall_pct_interval = max(1, total_iters // 100)
     for epoch in range(1, config.max_epochs + 1):
         epoch_loss = 0.0
         num_batches = 0
 
-        for x, y in train_loader:
+        for x, y in tqdm(train_loader, desc=f"  Epoch {epoch:3d}/{config.max_epochs}", leave=False):
             x, y = x.to(config.device), y.to(config.device)
 
             # 混合精度前向
@@ -590,12 +609,17 @@ def main():
             scheduler.step(step)
             step += 1
 
+            # 显示总体训练百分比
+            if step % overall_pct_interval == 0:
+                overall_pct = step / total_iters * 100
+                print(f"    总体训练进度: {overall_pct:.1f}%")
+
             epoch_loss += loss.item()
             num_batches += 1
 
         avg_loss = epoch_loss / num_batches
         if epoch % 10 == 0 or epoch == 1 or epoch == config.max_epochs:
-            print(f"  Epoch {epoch:3d}/{config.max_epochs}, "
+            print(f"    Epoch {epoch:3d}/{config.max_epochs} ({epoch/config.max_epochs*100:.0f}%), "
                   f"Loss: {avg_loss:.4f}, "
                   f"LR: {scheduler.get_lr():.6f}")
 
