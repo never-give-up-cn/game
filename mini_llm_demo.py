@@ -339,7 +339,7 @@ class MiniLLM(nn.Module):
 
     @torch.no_grad()
     def generate(self, idx, max_new_tokens, use_kv_cache=False,
-                 temperature=1.0, top_k=None, top_p=None):
+                 temperature=1.0, top_k=None, top_p=None, repetition_penalty=1.0):
         """自回归生成文本
 
         Args:
@@ -349,6 +349,7 @@ class MiniLLM(nn.Module):
             temperature: 采样温度（>1 更随机，<1 更确定）
             top_k: 只从概率最高的 k 个 token 中采样
             top_p: 累积概率阈值（Nucleus Sampling），0~1
+            repetition_penalty: 重复惩罚（>1.0 抑制重复，1.0=不惩罚）
         """
         # 边界保护：裁剪到 block_size
         idx = idx[:, -self.config.block_size:]
@@ -357,13 +358,18 @@ class MiniLLM(nn.Module):
         temperature = max(temperature, 1e-5)
 
         if use_kv_cache:
-            return self._generate_with_cache(idx, max_new_tokens, temperature, top_k, top_p)
+            return self._generate_with_cache(idx, max_new_tokens, temperature, top_k, top_p, repetition_penalty)
         else:
-            return self._generate_no_cache(idx, max_new_tokens, temperature, top_k, top_p)
+            return self._generate_no_cache(idx, max_new_tokens, temperature, top_k, top_p, repetition_penalty)
 
     @staticmethod
-    def _sample(logits, temperature, top_k, top_p):
-        """统一的采样逻辑：温度缩放 → Top-K 过滤 → Top-P 过滤 → 采样"""
+    def _sample(logits, temperature, top_k, top_p, prev_token_ids=None, repetition_penalty=1.0):
+        """统一的采样逻辑：重复惩罚 → 温度缩放 → Top-K → Top-P → 采样"""
+        # 重复惩罚
+        if repetition_penalty != 1.0 and prev_token_ids is not None and len(prev_token_ids) > 0:
+            for tid in prev_token_ids:
+                logits[:, tid] /= repetition_penalty
+
         logits = logits / temperature
 
         # Top-K 过滤
@@ -377,11 +383,9 @@ class MiniLLM(nn.Module):
         if top_p is not None:
             sorted_probs, sorted_indices = torch.sort(probs, descending=True, dim=-1)
             cumsum = torch.cumsum(sorted_probs, dim=-1)
-            # 保留累积概率 <= top_p 的 token（至少保留一个）
             mask = cumsum - sorted_probs > top_p
             sorted_probs[mask] = 0.0
             sorted_probs = sorted_probs / sorted_probs.sum(dim=-1, keepdim=True)
-            # 从排序后的分布中采样，再映射回原始索引
             sampled_idx = torch.multinomial(sorted_probs, num_samples=1)
             next_token = torch.gather(sorted_indices, -1, sampled_idx)
             return next_token
@@ -389,21 +393,22 @@ class MiniLLM(nn.Module):
         next_token = torch.multinomial(probs, num_samples=1)
         return next_token
 
-    def _generate_no_cache(self, idx, max_new_tokens, temperature, top_k, top_p):
+    def _generate_no_cache(self, idx, max_new_tokens, temperature, top_k, top_p, repetition_penalty):
         """无 KV Cache 的朴素生成（每步重新计算所有位置）"""
+        generated = idx.clone()
         for _ in range(max_new_tokens):
-            idx_crop = idx[:, -self.config.block_size:]
+            idx_crop = generated[:, -self.config.block_size:]
             logits = self(idx_crop)
             logits = logits[:, -1, :]
-            next_token = self._sample(logits, temperature, top_k, top_p)
-            idx = torch.cat((idx, next_token), dim=1)
-        return idx
+            prev_ids = set(generated[0].tolist())
+            next_token = self._sample(logits, temperature, top_k, top_p, prev_ids, repetition_penalty)
+            generated = torch.cat((generated, next_token), dim=1)
+        return generated
 
-    def _generate_with_cache(self, idx, max_new_tokens, temperature, top_k, top_p):
+    def _generate_with_cache(self, idx, max_new_tokens, temperature, top_k, top_p, repetition_penalty):
         """使用 KV Cache 加速生成
         每次调用创建全新的缓存字典，杜绝跨调用污染。
         """
-        # 全新缓存 —— 每个生成调用独立
         kv_caches = [{'k': None, 'v': None} for _ in range(self.config.n_layers)]
 
         generated = idx.clone()
@@ -411,50 +416,65 @@ class MiniLLM(nn.Module):
 
         # 第一步：处理 prompt（完整序列，填充缓存）
         logits = self(idx, kv_caches=kv_caches)
-        next_token = self._sample(logits[:, -1, :], temperature, top_k, top_p)
+        prev_ids = set(generated[0].tolist())
+        next_token = self._sample(logits[:, -1, :], temperature, top_k, top_p, prev_ids, repetition_penalty)
         generated = torch.cat((generated, next_token), dim=1)
 
         # 后续步骤：每次只送入最后 1 个 token
         for _ in range(max_new_tokens - 1):
             logits = self(next_token, kv_caches=kv_caches)  # T=1
-            next_token = self._sample(logits[:, -1, :], temperature, top_k, top_p)
+            prev_ids = set(generated[0].tolist())
+            next_token = self._sample(logits[:, -1, :], temperature, top_k, top_p, prev_ids, repetition_penalty)
             generated = torch.cat((generated, next_token), dim=1)
 
         return generated
 
 
 # ======================== 8. 数据准备 ========================
-def prepare_data(text, tokenizer, config: Config):
-    """将文本切分为重叠的 (input, target) 序列对"""
+def prepare_data(text, tokenizer, config: Config, val_split=0.1):
+    """将文本切分为重叠的 (input, target) 序列对，按比例划分训练/验证集
+
+    Returns:
+        train_loader, val_loader — 验证集为 None 当数据量不足时
+    """
     tokens = tokenizer.encode(text)
     print(f"  文本长度: {len(text)} 字符, {len(tokens)} tokens")
 
-    # 边界保护：文本太短时填充
     stride = config.block_size // 2
     max_start = len(tokens) - config.block_size
     if max_start <= 0:
         print(f"  ⚠ 文本不足一条序列 ({len(tokens)} tokens)，自动填充")
         pad_len = config.block_size + 1 - len(tokens)
         tokens = tokens + [0] * max(0, pad_len)
-        max_start = 1  # 至少生成一条
+        max_start = 1
 
     seqs = []
     for i in range(0, max_start, stride):
         seq = tokens[i:i + config.block_size + 1]
         seqs.append(seq)
 
-    # 极端保护（理论上不会触发，但防御性编程）
     if not seqs:
         seqs.append(tokens[:config.block_size + 1])
 
     data = torch.tensor(seqs, dtype=torch.long)
-    x = data[:, :-1]  # 输入
-    y = data[:, 1:]   # 目标（右移一位）
+    x = data[:, :-1]
+    y = data[:, 1:]
 
-    dataset = TensorDataset(x, y)
-    loader = DataLoader(dataset, batch_size=config.batch_size, shuffle=True)
-    print(f"  生成 {len(dataset)} 条序列, {len(loader)} 批次/轮")
-    return loader
+    # 训练/验证分割
+    n = len(x)
+    n_val = max(1, int(n * val_split))
+    n_train = n - n_val
+
+    train_dataset = TensorDataset(x[:n_train], y[:n_train])
+    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
+
+    val_loader = None
+    if n_val >= 1:
+        val_dataset = TensorDataset(x[n_train:], y[n_train:])
+        val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
+
+    print(f"  生成 {n} 条序列, 训练 {n_train} 条 / 验证 {n_val} 条")
+    return train_loader, val_loader
 
 
 # ======================== 9. 学习率调度（Warmup + Cosine） ========================
@@ -613,9 +633,9 @@ def main():
     if need_train:
         # ---- 3. 数据准备 ----
         print("\n[3/5] 准备数据...")
-        train_loader = prepare_data(TRAIN_TEXT, tokenizer, config)
+        train_loader, val_loader = prepare_data(TRAIN_TEXT, tokenizer, config)
 
-        # ---- 4. 训练 ----
+        # ---- 4. 训练（含验证集早停） ----
         print("\n[4/5] 开始训练...")
 
         optimizer = torch.optim.AdamW(
@@ -638,6 +658,12 @@ def main():
         scaler = torch.amp.GradScaler(config.device, enabled=use_amp)
 
         loss_fn = nn.CrossEntropyLoss()
+
+        # 早停参数
+        best_val_loss = float('inf')
+        patience = 5
+        stall_count = 0
+        best_epoch = 0
 
         model.train()
         step = 0
@@ -672,12 +698,45 @@ def main():
                 num_batches += 1
 
             avg_loss = epoch_loss / num_batches
+
+            # 验证集评估
+            val_loss = None
+            if val_loader is not None:
+                model.eval()
+                val_loss_total = 0.0
+                val_batches = 0
+                with torch.no_grad():
+                    for x_val, y_val in val_loader:
+                        x_val, y_val = x_val.to(config.device), y_val.to(config.device)
+                        logits = model(x_val)
+                        loss_val = loss_fn(logits.view(-1, vocab_size), y_val.view(-1))
+                        val_loss_total += loss_val.item()
+                        val_batches += 1
+                val_loss = val_loss_total / val_batches
+                model.train()
+
             if epoch % 10 == 0 or epoch == 1 or epoch == config.max_epochs:
+                val_str = f", Val Loss: {val_loss:.4f}" if val_loss is not None else ""
                 print(f"    Epoch {epoch:3d}/{config.max_epochs} ({epoch/config.max_epochs*100:.0f}%), "
-                      f"Loss: {avg_loss:.4f}, "
+                      f"Loss: {avg_loss:.4f}{val_str}, "
                       f"LR: {scheduler.get_lr():.6f}")
 
-        save_checkpoint(model, tokenizer, TRAIN_TEXT, config)
+            # 早停判断
+            if val_loss is not None:
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    best_epoch = epoch
+                    stall_count = 0
+                    save_checkpoint(model, tokenizer, TRAIN_TEXT, config)
+                else:
+                    stall_count += 1
+                    if stall_count >= patience:
+                        print(f"    ⏹ 早停: 验证 loss {patience} 轮未下降 (最佳 Epoch {best_epoch}, "
+                              f"Val Loss {best_val_loss:.4f})")
+                        break
+        else:
+            # 正常结束，保存最终模型
+            save_checkpoint(model, tokenizer, TRAIN_TEXT, config)
 
     # ---- 如果指定 --chat 则进入交互模式 ----
     if args.chat:
@@ -705,9 +764,10 @@ def main():
             prompt_ids,
             max_new_tokens=40,
             use_kv_cache=True,
-            temperature=0.5,
-            top_k=10,
+            temperature=0.8,
+            top_k=30,
             top_p=0.9,
+            repetition_penalty=1.2,
         )
         generated_text = tokenizer.decode(out[0].tolist())
         print(f"\n  Prompt: \"{prompt}\"")
@@ -721,13 +781,13 @@ def main():
 
     torch.cuda.synchronize() if config.device == "cuda" else None
     start = time.time()
-    _ = model.generate(prompt_ids, max_new_tokens=100, use_kv_cache=False, temperature=0.5)
+    _ = model.generate(prompt_ids, max_new_tokens=100, use_kv_cache=False, temperature=0.7)
     torch.cuda.synchronize() if config.device == "cuda" else None
     time_no_cache = time.time() - start
 
     torch.cuda.synchronize() if config.device == "cuda" else None
     start = time.time()
-    _ = model.generate(prompt_ids, max_new_tokens=100, use_kv_cache=True, temperature=0.5)
+    _ = model.generate(prompt_ids, max_new_tokens=100, use_kv_cache=True, temperature=0.7)
     torch.cuda.synchronize() if config.device == "cuda" else None
     time_with_cache = time.time() - start
 
