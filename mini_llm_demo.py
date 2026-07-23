@@ -77,7 +77,7 @@ class Config:
 # ========================== 训练文本 ==========================
 CN_NOVEL_FILE = os.path.join(os.path.dirname(__file__) or ".", "cleaned_novel.txt")
 EN_ALICE_FILE = os.path.join(os.path.dirname(__file__) or ".", "alice_in_wonderland.txt")
-MAX_TRAIN_CHARS = 200000  # 截取前 N 字符（None = 全量；与 cleaned_novel.txt 长度一致）
+MAX_TRAIN_CHARS = 500000  # 截取前 N 字符（None = 全量；与 preprocess.py 的配置一致）
 
 
 def _load_training_text():
