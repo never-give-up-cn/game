@@ -1,6 +1,7 @@
 """玩家/任务角色 - 在地图上移动"""
 
-from typing import Tuple
+from typing import Tuple, Optional
+from item import Inventory, ItemStack
 
 
 class Player:
@@ -14,6 +15,7 @@ class Player:
         self.max_hp = 100
         self.level = 1
         self.gold = 0
+        self.inventory = Inventory()
 
     @property
     def position(self) -> Tuple[int, int]:
@@ -28,6 +30,11 @@ class Player:
 
     def heal(self, amount: int):
         self.hp = min(self.max_hp, self.hp + amount)
+
+    @property
+    def selected_slot(self) -> Optional[ItemStack]:
+        """当前选中的物品栏格子"""
+        return self.inventory.slots[self.inventory.selected] if self.inventory.slots else None
 
     def status_line(self) -> str:
         """一行状态显示"""

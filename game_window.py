@@ -17,7 +17,9 @@ MAP_COLS, MAP_ROWS = 20, 12
 SIDEBAR_WIDTH = 200
 
 WIN_WIDTH = MAP_COLS * TILE_SIZE + SIDEBAR_WIDTH
-WIN_HEIGHT = MAP_ROWS * TILE_SIZE
+MAP_HEIGHT = MAP_ROWS * TILE_SIZE
+HOTBAR_HEIGHT = 110  # 底部背包栏高度
+WIN_HEIGHT = MAP_HEIGHT + HOTBAR_HEIGHT
 
 FPS = 60
 INFO_HEIGHT = 60
@@ -34,6 +36,14 @@ COLOR_SIDEBAR = (25, 25, 30)
 COLOR_TEXT = (220, 220, 220)
 COLOR_TEXT_DIM = (140, 140, 140)
 COLOR_HIGHLIGHT = (255, 220, 80)
+
+# 背包栏颜色
+COLOR_HOTBAR_BG = (20, 20, 28)
+COLOR_HOTBAR_BORDER = (60, 60, 70)
+COLOR_SLOT = (35, 35, 45)
+COLOR_SLOT_HOVER = (55, 55, 70)
+COLOR_SLOT_SELECTED = (100, 180, 255)
+COLOR_SLOT_SELECTED_BG = (50, 80, 120)
 
 BUILDING_COLORS: Dict[str, Tuple[int, int, int]] = {
     "工厂":   (70, 130, 200),
@@ -70,6 +80,15 @@ class GameWindow:
         self._init_demo_buildings()
         self.player = Player(10, 6, "工程师")
         self.game_map.set_player(self.player)
+        # 演示背包物品
+        inv = self.player.inventory
+        inv.add_item("wood", 12)
+        inv.add_item("stone", 8)
+        inv.add_item("iron", 5)
+        inv.add_item("bread", 3)
+        inv.add_item("apple", 2)
+        inv.add_item("key", 1)
+        inv.add_item("gold", 50)
 
         # 移动计时
         self.move_timer = 0
@@ -158,6 +177,12 @@ class GameWindow:
             # 启用长按连续移动
             self.move_initial = True
             self.move_timer = 0
+        elif pygame.K_1 <= key <= pygame.K_8:
+            # 数字键选择背包栏位 (1-8)
+            idx = key - pygame.K_1
+            inv = self.player.inventory
+            if idx < len(inv.slots):
+                inv.selected = idx
 
     def _place_key(self, key: int):
         if key == pygame.K_TAB:
@@ -279,13 +304,32 @@ class GameWindow:
         self.screen.blit(
             self.font.render(f"建筑 ({len(self.game_map.buildings)})", True, COLOR_HIGHLIGHT), (x, y))
         y += 24
-        for b in self.game_map.buildings[:8]:
+        for b in self.game_map.buildings[:7]:
             self.screen.blit(
                 self.font_small.render(f"  {b.name} ({b.x},{b.y})", True, COLOR_TEXT_DIM), (x, y))
             y += 18
-        if len(self.game_map.buildings) > 8:
+        if len(self.game_map.buildings) > 7:
             self.screen.blit(
-                self.font_small.render(f"  ... +{len(self.game_map.buildings)-8}", True, COLOR_TEXT_DIM), (x, y))
+                self.font_small.render(f"  ... +{len(self.game_map.buildings)-7}", True, COLOR_TEXT_DIM), (x, y))
+
+        # 背包摘要
+        y += 8
+        self.screen.blit(
+            self.font.render("背包", True, COLOR_HIGHLIGHT), (x, y))
+        y += 24
+        inv = self.player.inventory
+        items = inv.list_items()
+        if items:
+            for s in items[:5]:
+                self.screen.blit(
+                    self.font_small.render(f"  {s.icon} {s.name} x{s.quantity}", True, COLOR_TEXT_DIM), (x, y))
+                y += 18
+            if len(items) > 5:
+                self.screen.blit(
+                    self.font_small.render(f"  ... +{len(items)-5}", True, COLOR_TEXT_DIM), (x, y))
+        else:
+            self.screen.blit(
+                self.font_small.render("  (空)", True, COLOR_TEXT_DIM), (x, y))
 
     def _draw_placement(self):
         if not self.placing:
@@ -305,10 +349,10 @@ class GameWindow:
                 s.fill(color)
                 self.screen.blit(s, rect)
 
-        # 底部提示栏
+        # 底部提示栏 (地图区域底部, 非热栏)
         panel = pygame.Surface((420, INFO_HEIGHT), pygame.SRCALPHA)
         panel.fill((20, 20, 25, 220))
-        self.screen.blit(panel, (10, WIN_HEIGHT - INFO_HEIGHT - 10))
+        self.screen.blit(panel, (10, MAP_HEIGHT - INFO_HEIGHT - 10))
 
         lines = [
             f"放置: {name} ({w}x{h})   {'' if valid else '区域被占用!'}",
@@ -316,10 +360,10 @@ class GameWindow:
         ]
         for i, line in enumerate(lines):
             c = COLOR_HIGHLIGHT if valid else (255, 80, 80)
-            self.screen.blit(self.font.render(line, True, c), (18, WIN_HEIGHT - INFO_HEIGHT - 6 + i * 22))
+            self.screen.blit(self.font.render(line, True, c), (18, MAP_HEIGHT - INFO_HEIGHT - 6 + i * 22))
 
     def _draw_messages(self):
-        y = WIN_HEIGHT - 30
+        y = MAP_HEIGHT - 30
         keep = []
         for text, remain in self.messages:
             if remain > 0:
@@ -327,6 +371,69 @@ class GameWindow:
                 self.screen.blit(self.font.render(text, True, COLOR_HIGHLIGHT), (10, y))
                 y -= 22
         self.messages = keep
+
+    # ========== 背包 ==========
+
+    def _draw_hotbar(self):
+        """底部背包物品栏"""
+        inv = self.player.inventory
+        slots_per_row = 8
+        slot_rows = 2
+        cell_w = 56
+        cell_h = 44
+        gap = 6
+
+        total_w = slots_per_row * (cell_w + gap) - gap
+        bar_rect = pygame.Rect(0, MAP_HEIGHT, MAP_COLS * TILE_SIZE, HOTBAR_HEIGHT)
+        pygame.draw.rect(self.screen, COLOR_HOTBAR_BG, bar_rect)
+        pygame.draw.line(self.screen, COLOR_HOTBAR_BORDER,
+                         (0, MAP_HEIGHT), (MAP_COLS * TILE_SIZE, MAP_HEIGHT), 3)
+
+        for idx in range(slots_per_row * slot_rows):
+            row = idx // slots_per_row
+            col = idx % slots_per_row
+            cx = bar_rect.x + (bar_rect.width - total_w) // 2 + col * (cell_w + gap)
+            cy = bar_rect.y + 6 + row * (cell_h + gap)
+
+            slot_rect = pygame.Rect(cx, cy, cell_w, cell_h)
+            stack = inv.slots[idx] if idx < len(inv.slots) else None
+            is_selected = (idx == inv.selected and stack is not None)
+
+            if is_selected:
+                pygame.draw.rect(self.screen, COLOR_SLOT_SELECTED_BG, slot_rect)
+                pygame.draw.rect(self.screen, COLOR_SLOT_SELECTED, slot_rect, 2)
+            elif stack:
+                pygame.draw.rect(self.screen, COLOR_SLOT_HOVER, slot_rect)
+                pygame.draw.rect(self.screen, COLOR_HOTBAR_BORDER, slot_rect, 1)
+            else:
+                pygame.draw.rect(self.screen, COLOR_SLOT, slot_rect)
+                pygame.draw.rect(self.screen, COLOR_HOTBAR_BORDER, slot_rect, 1)
+
+            if stack:
+                # 图标
+                try:
+                    icon = self.font_large.render(stack.item.icon, True, COLOR_TEXT)
+                except Exception:
+                    icon = self.font_large.render("?", True, COLOR_TEXT)
+                ix = cx + (cell_w - icon.get_width()) // 2
+                self.screen.blit(icon, (ix, cy + 2))
+                # 数量
+                if stack.quantity > 1:
+                    qty = self.font_small.render(str(stack.quantity), True, COLOR_HIGHLIGHT)
+                    self.screen.blit(qty, (cx + cell_w - qty.get_width() - 3,
+                                           cy + cell_h - qty.get_height() - 2))
+
+            # 编号
+            if row == 0:
+                num = self.font_small.render(str(col + 1), True, COLOR_TEXT_DIM)
+                self.screen.blit(num, (cx + 3, cy + 2))
+
+        # 选中物品名称
+        sel = inv.slots[inv.selected] if inv.selected < len(inv.slots) else None
+        if sel:
+            label = f"{sel.name}  ({sel.item.description})"
+            surf = self.font_small.render(label, True, COLOR_TEXT_DIM)
+            self.screen.blit(surf, (bar_rect.x + 10, MAP_HEIGHT + HOTBAR_HEIGHT - 20))
 
     def _draw_help(self):
         if not self.show_help:
@@ -345,6 +452,7 @@ class GameWindow:
             "W + D         右上 (斜向)",
             "S + A         左下 (斜向)",
             "S + D         右下 (斜向)", "",
+            "1 ~ 8         选择背包物品",
             "B             打开 / 确认放置建筑",
             "TAB            切换建筑类型",
             "ESC            取消 / 关闭帮助",
@@ -377,6 +485,7 @@ class GameWindow:
             self._draw_grid()
             self._draw_player()
             self._draw_sidebar()
+            self._draw_hotbar()
             self._draw_placement()
             self._draw_messages()
             self._draw_help()
