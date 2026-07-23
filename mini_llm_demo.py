@@ -189,14 +189,17 @@ def apply_rope(x, cos, sin):
     x1, x2 = x[..., :half], x[..., half:]
     seq_len = x.shape[-2]
 
-    # 越界时扩展 RoPE 表（线性外推）
+    # 越界时动态计算新位置的频率（而非简单复制末尾）
     if seq_len > cos.size(0):
-        print(f"  ⚠ RoPE 表大小 {cos.size(0)} < 序列长度 {seq_len}，自动扩展")
-        # NTK-aware 外推：增大 theta 以扩展
-        scale = seq_len / cos.size(0)
-        new_cos = torch.cat([cos, cos[-1:].repeat(seq_len - cos.size(0), 1)], dim=0)
-        new_sin = torch.cat([sin, sin[-1:].repeat(seq_len - sin.size(0), 1)], dim=0)
-        cos, sin = new_cos, new_sin
+        print(f"  ⚠ RoPE 动态扩展: {cos.size(0)} -> {seq_len}")
+        old_len = cos.size(0)
+        half_dim = cos.shape[-1]
+        # 为新位置计算频率
+        freqs = 1.0 / (10000.0 ** (torch.arange(0, half_dim, dtype=torch.float32, device=x.device) / half_dim))
+        new_t = torch.arange(old_len, seq_len, dtype=torch.float32, device=x.device)
+        new_freqs = torch.outer(new_t, freqs)
+        cos = torch.cat([cos, new_freqs.cos()], dim=0)
+        sin = torch.cat([sin, new_freqs.sin()], dim=0)
 
     cos_ = cos[:seq_len, ...]
     sin_ = sin[:seq_len, ...]
@@ -293,6 +296,8 @@ class TransformerBlock(nn.Module):
         self.attn = MultiHeadAttention(config)
 
         hidden_dim = int(config.embed_dim * 4)
+        # 对齐到 128 的倍数（改善矩阵乘法效率）
+        hidden_dim = ((hidden_dim + 127) // 128) * 128
         self.mlp = SwiGLUFFN(config.embed_dim, hidden_dim)
         self.dropout = nn.Dropout(config.dropout)
 
@@ -482,13 +487,19 @@ def prepare_data(text, tokenizer, config: Config, val_split=0.1):
     n_val = max(1, int(n_total * val_split))
     n_train = n_total - n_val
 
+    # GPU 时开启多进程加载和 pin_memory 加速数据传输
+    dl_kwargs = dict(
+        batch_size=config.batch_size,
+        num_workers=4 if config.device == "cuda" else 0,
+        pin_memory=(config.device == "cuda"),
+    )
     train_dataset = TensorDataset(x[:n_train], y[:n_train])
-    train_loader = DataLoader(train_dataset, batch_size=config.batch_size, shuffle=True)
+    train_loader = DataLoader(train_dataset, shuffle=True, **dl_kwargs)
 
     val_loader = None
     if n_val >= 1:
         val_dataset = TensorDataset(x[n_train:], y[n_train:])
-        val_loader = DataLoader(val_dataset, batch_size=config.batch_size, shuffle=False)
+        val_loader = DataLoader(val_dataset, shuffle=False, **dl_kwargs)
 
     print(f"  生成 {n_total} 条序列, 训练 {n_train} 条 / 验证 {n_val} 条")
     return train_loader, val_loader
@@ -662,7 +673,8 @@ def main():
             betas=(0.9, 0.95),
         )
 
-        total_iters = config.max_epochs * len(train_loader)
+        # 真实迭代步数（考虑梯度累积：每 accum_steps 个微批次才更新一次参数和 LR）
+        total_iters = config.max_epochs * (len(train_loader) // config.gradient_accumulation_steps)
         scheduler = WarmupCosineLR(
             optimizer,
             warmup_iters=config.warmup_iters,
