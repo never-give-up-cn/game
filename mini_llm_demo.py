@@ -595,11 +595,13 @@ MODEL_PATH = os.path.join(os.path.dirname(__file__) or ".", "mini_llm_checkpoint
 
 
 def _config_fingerprint(config):
-    """生成超参指纹，用于检测超参变更"""
+    """生成超参指纹（包含所有关键超参，检测任何变更）"""
     return hash((
         config.embed_dim, config.n_heads, config.block_size,
         config.n_layers, config.dropout, config.lr,
         config.max_epochs, config.grad_clip,
+        getattr(config, 'n_kv_heads', config.n_heads),
+        getattr(config, 'sliding_window', None),
     ))
 
 
