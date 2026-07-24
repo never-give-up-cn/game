@@ -163,6 +163,7 @@ class GameWindow:
         self.mouse_grid_pos: Tuple[int, int] = (-1, -1)
         self.mouse_in_map = False
         self.hover_slot_idx = -1
+        self.hovered_ore = None  # 悬浮的矿物信息 (item_id, name, amount, max)
 
     def _make_font(self, size: int):
         """从系统字体文件加载中文字体"""
@@ -292,6 +293,23 @@ class GameWindow:
             bld = self._building_at(gx, gy)
             if bld:
                 self.selected_building = bld
+                self.hovered_ore = None
+            else:
+                # 悬浮在矿物上
+                ore_id = self.game_map.get_ore(gx, gy)
+                if ore_id:
+                    from item import ITEM_TEMPLATES as _it
+                    t = _it.get(ore_id)
+                    # 从 resource_mgr 获取储量信息
+                    node = self.game_map.resource_mgr.get_node_at(gx, gy)
+                    if node:
+                        self.hovered_ore = (ore_id, t.name if t else ore_id,
+                                           t.icon if t else "?", node.amount, node.max_amount)
+                        self.selected_building = None
+                    else:
+                        self.hovered_ore = None
+                else:
+                    self.hovered_ore = None
         else:
             self.mouse_in_map = False
         # 背包格子
@@ -710,6 +728,24 @@ class GameWindow:
                     self.font_small.render(f"  -> 建造: {bld}", True, (150, 255, 150)), (x, y))
                 y += 16
             y += 4
+
+        # 悬浮矿物详情
+        if self.hovered_ore:
+            oid, oname, oicon, oamt, omax = self.hovered_ore
+            pct = int(oamt / max(omax, 1) * 100)
+            self.screen.blit(
+                self.font_small.render(f"{oicon} {oname}  矿脉", True, (220, 200, 120)), (x, y))
+            y += 18
+            self.screen.blit(
+                self.font_small.render(f"  储量: {oamt:.0f}/{omax:.0f} ({pct}%)", True, COLOR_TEXT), (x, y))
+            y += 16
+            # 储量进度条
+            bw, bh = 80, 4
+            pygame.draw.rect(self.screen, (30, 25, 20), (x + 10, y, bw, bh))
+            ratio = oamt / max(omax, 1)
+            c = (80, 200, 80) if ratio > 0.3 else (200, 160, 60) if ratio > 0.1 else (200, 60, 60)
+            pygame.draw.rect(self.screen, c, (x + 10, y, int(bw * ratio), bh))
+            y += 10
 
         # 选中建筑详情（紧凑格式，同玩家信息）
         if self.selected_building:
