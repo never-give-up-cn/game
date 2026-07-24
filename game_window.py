@@ -527,14 +527,14 @@ class GameWindow:
         gx, gy = self.mouse_grid_pos
         bld = self._building_at(gx, gy)
         if bld and hasattr(bld, 'lanes'):
-            lane = self._near_lane(bld)
-            if bld.add_item(self.cursor_item, lane):
-                self.cursor_count -= 1
-                if self.cursor_count <= 0:
-                    self.cursor_item = None; self.cursor_count = 0
-                self._msg(f"Z↓ {self.cursor_item} → {lane}")
-            else:
-                self._msg("该车道已满")
+            for try_lane in ("left", "right"):
+                if bld.add_item(self.cursor_item, try_lane):
+                    self.cursor_count -= 1
+                    if self.cursor_count <= 0:
+                        self.cursor_item = None; self.cursor_count = 0
+                    self._msg(f"Z↓ {self.cursor_item} → {try_lane}")
+                    return
+            self._msg("两条车道都满了")
         else:
             if not hasattr(self, '_ground_items'):
                 self._ground_items = {}
@@ -554,7 +554,7 @@ class GameWindow:
             for ln in ("left", "right"):
                 lane = bld.lanes.get(ln, [])
                 if lane:
-                    item = lane.pop(0)
+                    item = lane.pop(-1)  # 从车头取
                     if self.cursor_item == item["id"]:
                         self.cursor_count += 1
                     elif not self.cursor_item:
@@ -877,21 +877,17 @@ class GameWindow:
                 ty = end_y - int(tip_size * m2.cos(m2.radians(a)))
                 pygame.draw.line(self.screen, arrow_c, (end_x, end_y), (tx, ty), 2)
 
-        # 传送带物品渲染 (队列模型: index 0=车尾, last=车头)
+        # 传送带物品渲染 (progress 模型)
         if bld and hasattr(bld, 'lanes'):
             from item import ITEM_TEMPLATES as _belt_it
             dir_angle = bld.direction * 90
             rad = math.radians(dir_angle)
             cx2 = rect.centerx
             cy2 = rect.centery
-            cap = getattr(bld, 'capacity', 4)
             for lane_name, off in [("left", -6), ("right", 6)]:
                 lane = bld.lanes.get(lane_name, [])
-                n = len(lane)
-                for idx, item in enumerate(lane):
-                    # 位置: 0(cap中的最后一格) → 1(车头)
-                    # idx 0=车尾, n-1=车头
-                    progress = (idx + 1) / (cap + 1)  # 1/5, 2/5, 3/5, 4/5
+                for item in lane:
+                    progress = item.get("p", 0.0)
                     px = cx2 + int((progress - 0.5) * 16 * math.sin(rad))
                     py = cy2 - int((progress - 0.5) * 16 * math.cos(rad))
                     lx = px + int(off * math.cos(rad))

@@ -1,4 +1,4 @@
-"""传送带系统 - 队列模型 (尾→头, 车尾→车头)"""
+"""传送带系统 - progress 推进模型"""
 
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 from building.base import BuildingBase
@@ -6,22 +6,20 @@ from building.base import BuildingBase
 if TYPE_CHECKING:
     from map_grid import MapGrid
 
-BELT_SPECS = {1: {"speed": 7.5/60, "cap": 4}, 2: {"speed": 15/60, "cap": 4},
-              3: {"speed": 22.5/60, "cap": 4}, 4: {"speed": 30/60, "cap": 4}}
+BELT_SPECS = {1: 7.5/60, 2: 15/60, 3: 22.5/60, 4: 30/60}  # 每帧移动量
 UG_DIST = {1: 4, 2: 6, 3: 8, 4: 10}
 DIR_VEC = [(0, -1), (1, 0), (0, 1), (-1, 0)]
 
 
 class ConveyorBelt(BuildingBase):
-    """传送带 - 队列模型: lane[List], index 0=车尾, last=车头"""
+    """传送带 - progress 推进 + 首尾直连"""
 
     def __init__(self, x, y, template):
         super().__init__(x, y, template)
         self.direction = 0
         self.tier = template.get("belt_tier", 1)
-        s = BELT_SPECS.get(self.tier, BELT_SPECS[1])
-        self.belt_speed = s["speed"]
-        self.capacity = s["cap"]
+        self.belt_speed = BELT_SPECS.get(self.tier, 7.5/60)
+        self.capacity = 4
         self.lanes: Dict[str, List[dict]] = {"left": [], "right": []}
         self.game_map: Optional["MapGrid"] = None
 
@@ -34,12 +32,11 @@ class ConveyorBelt(BuildingBase):
         return self.x + dx, self.y + dy
 
     def add_item(self, item_id: str, lane: str = "left") -> bool:
-        """从车尾(index 0)加入物品"""
         if lane not in self.lanes:
             lane = "left"
         if len(self.lanes[lane]) >= self.capacity:
             return False
-        self.lanes[lane].insert(0, {"id": item_id})
+        self.lanes[lane].insert(0, {"id": item_id, "p": 0.0})  # p=progress 0~1
         return True
 
     def _find_next(self):
@@ -52,36 +49,46 @@ class ConveyorBelt(BuildingBase):
         return None
 
     def _target_lane(self, my_lane, my_dir, next_dir):
-        """计算车道映射 (直连/转弯)"""
         if my_dir == next_dir:
             return my_lane
-        turn_right = (my_dir + 1) % 4 == next_dir
-        turn_left = (my_dir - 1) % 4 == next_dir
-        if turn_right:
+        turn_r = (my_dir + 1) % 4 == next_dir
+        turn_l = (my_dir - 1) % 4 == next_dir
+        if turn_r:
             return "left" if my_lane == "left" else "right"
-        if turn_left:
+        if turn_l:
             return "right" if my_lane == "left" else "left"
         return my_lane
 
     def tick(self, inventory) -> dict:
-        """每帧: 从车头(last)→车尾(0)处理"""
+        spd = self.belt_speed
         for ln in ("left", "right"):
             lane = self.lanes[ln]
             if not lane:
                 continue
-            # 车头 = last index
+
+            # 1. 所有物品推进
+            for item in lane:
+                item["p"] += spd
+
+            # 2. 车头(progress最高)尝试转移
             head = lane[-1]
-            next_belt = self._find_next()
-            transferred = False
-            if next_belt:
-                tl = self._target_lane(ln, self.direction, next_belt.direction)
-                if len(next_belt.lanes.get(tl, [])) < next_belt.capacity:
-                    next_belt.lanes[tl].insert(0, head)  # 到下游车尾
-                    lane.pop()
-                    transferred = True
-            # 没转移时, 车头不动, 后方都堵住
-            # 但物品还是要按速度推进 (用帧计数器也可以)
-            # 简化: 每帧推进内部间距 (用 belt_speed 控制视觉移动)
+            if head["p"] >= 1.0:
+                next_belt = self._find_next()
+                if next_belt:
+                    tl = self._target_lane(ln, self.direction, next_belt.direction)
+                    tgt = next_belt.lanes.get(tl, [])
+                    if len(tgt) < next_belt.capacity:
+                        head["p"] = 0.0  # 重置进度
+                        tgt.insert(0, head)
+                        lane.pop()
+                    else:
+                        head["p"] = 1.0  # 堵住不动
+                else:
+                    head["p"] = 1.0  # 断头排队
+
+            # 3. 移除溢出 (安全)
+            while len(lane) > self.capacity:
+                lane.pop(0)
         return {}
 
     def __repr__(self):
@@ -127,26 +134,34 @@ class Splitter(BuildingBase):
     def __init__(self, x, y, template):
         super().__init__(x, y, template)
         self.tier = template.get("belt_tier", 1)
+        self.capacity = 4
         self.priority = "none"
         self.filter_items: List[str] = []
         self.input_buf: Dict[str, List] = {"left": [], "right": []}
         self.output_buf: Dict[str, List] = {"left": [], "right": []}
-        self.toggle = 0
+        self.toggle_l = 0  # 左车道独立 toggle
+        self.toggle_r = 0
 
     def tick(self, inventory) -> dict:
         for lane in ("left", "right"):
-            if self.input_buf[lane]:
-                item = self.input_buf[lane].pop(0)
-                if self.filter_items and item["id"] not in self.filter_items:
-                    out = "right" if lane == "left" else "left"
-                elif self.priority == "left":
-                    out = "left"
-                elif self.priority == "right":
-                    out = "right"
-                else:
-                    out = "left" if self.toggle % 2 == 0 else "right"
-                    self.toggle += 1
-                self.output_buf[out].append(item)
+            if not self.input_buf[lane]:
+                continue
+            item = self.input_buf[lane][0]  # peek
+            # 过滤
+            if self.filter_items and item["id"] not in self.filter_items:
+                out = "right" if lane == "left" else "left"
+            elif self.priority == "left":
+                out = "left"
+            elif self.priority == "right":
+                out = "right"
+            else:
+                tog = self.toggle_l if lane == "left" else self.toggle_r
+                out = "left" if tog % 2 == 0 else "right"
+                if lane == "left": self.toggle_l += 1
+                else: self.toggle_r += 1
+            # 检查输出容量
+            if len(self.output_buf[out]) < self.capacity:
+                self.output_buf[out].append(self.input_buf[lane].pop(0))
         return {}
 
     def render_popup(self, screen, rect, mx, my, inventory, tech_unlocked, font_small, anim_frame):
