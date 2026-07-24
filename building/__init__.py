@@ -4,6 +4,7 @@ from typing import Dict, Any, List, Type
 
 from .base import BuildingBase
 from .templates import BUILDING_TEMPLATES, BUILDING_NAMES
+from inserter import Inserter
 
 
 # 建筑类注册表：模板名 -> Python 类
@@ -15,6 +16,11 @@ def register_building(template_name: str, cls: Type[BuildingBase]):
     """注册自定义建筑类（用于自定义弹窗等）"""
     _BUILDING_CLASSES[template_name] = cls
 
+
+# 自动注册所有机械臂
+for _name in BUILDING_NAMES:
+    if "机械臂" in _name:
+        _BUILDING_CLASSES[_name] = Inserter
 
 def Building(x: int, y: int, template_name: str) -> BuildingBase:
     """工厂函数：根据模板名创建建筑实例"""

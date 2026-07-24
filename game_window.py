@@ -76,7 +76,12 @@ ITEM_TO_BUILDING = {
     "iron": "工厂",
     "steel": "研究所",
     "coal": "仓库",
+    # 机械臂
+    "iron": "电力机械臂",
 }
+
+# 机械臂类名列表（用于方向箭头渲染）
+_INSERTER_NAMES = [n for n in BUILDING_NAMES if "机械臂" in n]
 
 DEMOLISH_TIME = FPS * 2  # 按住右键 2 秒拆除
 
@@ -233,6 +238,11 @@ class GameWindow:
             self.show_building_panel = False
         elif key == pygame.K_t:
             self.show_tech_tree = not self.show_tech_tree
+        elif key == pygame.K_r:
+            # R: 旋转选中的机械臂
+            if self.selected_building and hasattr(self.selected_building, 'rotate'):
+                self.selected_building.rotate()
+                self._msg(f"{self.selected_building.name} 方向: {self.selected_building.direction_name}")
         elif key == pygame.K_b:
             if not self.placing:
                 self.placing = True
@@ -567,6 +577,27 @@ class GameWindow:
             pygame.draw.polygon(self.screen, (255, 200, 50), tri)
             exc = self.font_small.render("!", True, (30, 30, 35))
             self.screen.blit(exc, (rect.right - 10, rect.top + 1))
+
+        # 机械臂方向箭头
+        if bld and hasattr(bld, 'direction'):
+            cx2 = rect.centerx
+            cy2 = rect.centery
+            dir_angle = bld.direction * 90  # 0=up, 1=right, 2=down, 3=left
+            import math as m2
+            rad = m2.radians(dir_angle)
+            # 箭头线
+            end_x = cx2 + int(12 * m2.sin(rad))
+            end_y = cy2 - int(12 * m2.cos(rad))
+            pygame.draw.line(self.screen, (255, 220, 80), (cx2, cy2), (end_x, end_y), 3)
+            # 箭头头部
+            tip_size = 5
+            a1 = dir_angle + 150
+            a2 = dir_angle - 150
+            for a in (a1, a2):
+                r2 = m2.radians(a)
+                tx = end_x + int(tip_size * m2.sin(r2))
+                ty = end_y - int(tip_size * m2.cos(r2))
+                pygame.draw.line(self.screen, (255, 220, 80), (end_x, end_y), (tx, ty), 2)
 
     def _draw_player(self):
         cx = self.player.x * TILE_SIZE + TILE_SIZE // 2
