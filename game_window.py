@@ -609,34 +609,50 @@ class GameWindow:
         # 标题
         title = self.font_large.render("信息", True, COLOR_HIGHLIGHT)
         self.screen.blit(title, (x, y))
-        y += 30
+        y += 28
 
-        # 玩家信息
-        for line in [
-            f"玩家: {self.player.name}",
-            f"等级: Lv.{self.player.level}",
-            f"HP: {self.player.hp}/{self.player.max_hp}",
-            f"坐标: ({self.player.x}, {self.player.y})",
-        ]:
-            self.screen.blit(self.font.render(line, True, COLOR_TEXT), (x, y))
-            y += 20
-        y += 6
+        # 玩家信息（紧凑）
+        info_lines = [
+            f"{self.player.name}  Lv.{self.player.level}",
+            f"HP: {self.player.hp}/{self.player.max_hp}  ({self.player.x},{self.player.y})",
+        ]
+        for line in info_lines:
+            self.screen.blit(self.font_small.render(line, True, COLOR_TEXT), (x, y))
+            y += 17
+        y += 4
 
-        # 选中建筑详情
+        # 选中物品详情（热栏中的物品）
+        sel_slot = self.player.selected_slot
+        if sel_slot:
+            from item import ITEM_TEMPLATES as _it
+            item = sel_slot.item
+            self.screen.blit(
+                self.font_small.render(f"{item.icon} {item.name}  {item.category}", True, COLOR_HIGHLIGHT), (x, y))
+            y += 18
+            self.screen.blit(
+                self.font_small.render(f"  {item.description}", True, COLOR_TEXT_DIM), (x, y))
+            y += 16
+            bld = ITEM_TO_BUILDING.get(item.item_id)
+            if bld:
+                self.screen.blit(
+                    self.font_small.render(f"  -> 建造: {bld}", True, (150, 255, 150)), (x, y))
+                y += 16
+            y += 4
+
+        # 选中建筑详情（紧凑格式，同玩家信息）
         if self.selected_building:
             b = self.selected_building
             self.screen.blit(
-                self.font.render(f"[选中] {b.name}", True, COLOR_HIGHLIGHT), (x, y))
-            y += 22
-            for line in [
-                f"位置: ({b.x},{b.y}) {b.w}x{b.h}",
-                f"HP: {b.hp}/{b.max_hp}",
-                b.production_summary,
-            ]:
+                self.font_small.render(f"{b.name}  {b.w}x{b.h}  ({b.x},{b.y})", True, COLOR_HIGHLIGHT), (x, y))
+            y += 18
+            self.screen.blit(
+                self.font_small.render(f"HP: {b.hp}/{b.max_hp}", True, COLOR_TEXT), (x, y))
+            y += 17
+            summary = b.production_summary
+            if summary:
                 self.screen.blit(
-                    self.font_small.render(line, True, COLOR_TEXT_DIM), (x, y))
+                    self.font_small.render(f"  {summary}", True, COLOR_TEXT_DIM), (x, y))
                 y += 17
-            # 输入材料背包存量
             if b.inputs:
                 for iid, amt in b.inputs.items():
                     from item import ITEM_TEMPLATES as _it
@@ -647,30 +663,29 @@ class GameWindow:
                     self.screen.blit(
                         self.font_small.render(f"  {mn} {hv}/{amt}", True, c), (x, y))
                     y += 16
-            y += 6
+            y += 4
         else:
-            # 建筑列表
             self.screen.blit(
-                self.font.render(f"建筑 ({len(self.game_map.buildings)})", True, COLOR_HIGHLIGHT), (x, y))
-            y += 22
-            for b in self.game_map.buildings[:6]:
+                self.font_small.render(f"建筑 ({len(self.game_map.buildings)})", True, COLOR_HIGHLIGHT), (x, y))
+            y += 18
+            for b in self.game_map.buildings[:5]:
                 self.screen.blit(
                     self.font_small.render(f"  {b.name} ({b.x},{b.y})", True, COLOR_TEXT_DIM), (x, y))
-                y += 16
-            if len(self.game_map.buildings) > 6:
+                y += 15
+            if len(self.game_map.buildings) > 5:
                 self.screen.blit(
-                    self.font_small.render(f"  ... +{len(self.game_map.buildings)-6}", True, COLOR_TEXT_DIM), (x, y))
-            y += 6
+                    self.font_small.render(f"  ... +{len(self.game_map.buildings)-5}", True, COLOR_TEXT_DIM), (x, y))
+            y += 4
 
-        # 背包摘要（精简）
-        self.screen.blit(self.font.render("背包", True, COLOR_HIGHLIGHT), (x, y))
-        y += 22
+        # 背包摘要（紧凑）
+        self.screen.blit(self.font_small.render("背包", True, COLOR_HIGHLIGHT), (x, y))
+        y += 18
         items = inv.list_items()
         if items:
             for s in items[:4]:
                 self.screen.blit(
                     self.font_small.render(f"  {s.icon} {s.name} x{s.quantity}", True, COLOR_TEXT_DIM), (x, y))
-                y += 16
+                y += 15
             if len(items) > 4:
                 self.screen.blit(
                     self.font_small.render(f"  ... +{len(items)-4}", True, COLOR_TEXT_DIM), (x, y))
