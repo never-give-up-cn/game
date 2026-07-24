@@ -96,6 +96,24 @@ BUILDING_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "inputs": {},
         "outputs": {},
     },
+    "苹果工厂": {
+        "name": "苹果工厂",
+        "width": 2, "height": 2,
+        "color": "red",
+        "description": "消耗煤炭生产苹果",
+        "max_hp": 120,
+        "power_consumption": 8.0,
+        "speed": 1.0,
+        "efficiency": 1.0,
+        "quality": 1.0,
+        "pollution": 2.0,
+        "freshness": 1.0,
+        "weight": 300,
+        "plugin_slots": 1,
+        "construction_materials": {"iron": 5, "wood": 5},
+        "inputs": {"coal": 2},
+        "outputs": {"apple": 3},
+    },
 }
 
 # 建筑名称列表（方便遍历）
