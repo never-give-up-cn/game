@@ -77,8 +77,6 @@ ITEM_TO_BUILDING = {
     "iron": "工厂",
     "steel": "研究所",
     "coal": "仓库",
-    # 机械臂
-    "iron": "电力机械臂",
     "belt_item": "基础传送带",
     "inserter_item": "电力机械臂",
 }
@@ -551,18 +549,26 @@ class GameWindow:
                         self.player.inventory.add_item(item["id"], 1)
                     self._msg(f"F↑ {item['id']}"); return
         if hasattr(self, '_ground_items'):
-                key = (gx, gy)
-                if key in self._ground_items and self._ground_items[key]:
-                    iid, cnt = next(iter(self._ground_items[key].items()))
-                    del self._ground_items[key][iid]
-                    if not self._ground_items[key]: del self._ground_items[key]
-                    if self.cursor_item == iid:
-                        self.cursor_count += cnt
-                    elif not self.cursor_item:
-                        self.cursor_item = iid; self.cursor_count = cnt
-                    else:
-                        self.player.inventory.add_item(iid, cnt)
-                    self._msg(f"F↑ {iid} x{cnt}"); return
+            key = (gx, gy)
+            if key in self._ground_items and self._ground_items[key]:
+                iid, cnt = next(iter(self._ground_items[key].items()))
+                del self._ground_items[key][iid]
+                if not self._ground_items[key]: del self._ground_items[key]
+                if self.cursor_item == iid:
+                    self.cursor_count += cnt
+                elif not self.cursor_item:
+                    self.cursor_item = iid; self.cursor_count = cnt
+                else:
+                    self.player.inventory.add_item(iid, cnt)
+                self._msg(f"F↑ {iid} x{cnt}"); return
+
+        # 矿脉开采 (F on ore)
+        ore_id = self.game_map.get_ore(gx, gy)
+        if ore_id:
+            mined_id, mined_amt = self.game_map.resource_mgr.mine_at(gx, gy, 1)
+            if mined_id and mined_amt > 0:
+                self.player.inventory.add_item(mined_id, int(mined_amt))
+                self._msg(f"开采: {mined_id}")
 
     def _place_with_selected(self, gx: int, gy: int):
         """根据选中的背包物品放置对应建筑（消耗物品）"""
@@ -606,10 +612,38 @@ class GameWindow:
             self._msg(f"失败: {e}")
 
     def _tick_buildings(self):
-        """每帧更新所有建筑（传送带物品移动等）"""
         inv = self.player.inventory
         for b in self.game_map.buildings[:]:
             b.tick(inv)
+
+    def _tick_research(self):
+        """每帧推进研究进度"""
+        rq = self.research_queue
+        if not rq.current_node:
+            rq.start_next()
+            return
+        node = rq.current_node
+        if not node:
+            rq.current = None
+            return
+        inv = self.player.inventory
+        if self.anim_frame % 60 == 0:
+            if node.consume_science(inv):
+                rq.progress += 0.1
+            elif node.requirements:
+                for iid, amt in node.requirements.items():
+                    if inv.count(iid) >= amt:
+                        inv.remove_item(iid, amt)
+                        rq.progress += 0.05
+                        break
+        if rq.progress >= 1.0:
+            if node.can_unlock(inv, self.tech_unlocked):
+                node.unlock(inv)
+                self.tech_unlocked.add(node.node_id)
+                self._msg(f"研究完成: {node.name}")
+            rq.current = None
+            rq.progress = 0.0
+            rq.start_next()
 
     def _tick_demolish(self):
         """每帧推进拆除进度（按住右键时）"""
@@ -628,6 +662,13 @@ class GameWindow:
         if self.demolish_frames >= DEMOLISH_TIME:
             bld = self.demolish_target
             self._msg(f"拆除 {bld.name}")
+            if not hasattr(self, '_ground_items'):
+                self._ground_items = {}
+            for mat_id, mat_amt in bld.construction_materials.items():
+                key = (bld.x, bld.y)
+                self._ground_items.setdefault(key, {})
+                refund = max(1, mat_amt // 2)
+                self._ground_items[key][mat_id] = self._ground_items[key].get(mat_id, 0) + refund
             self.game_map.remove_building(bld)
             self._cancel_demolish()
             self.right_held = False
@@ -641,6 +682,7 @@ class GameWindow:
         """每帧更新移动 + 相机跟随"""
         self.anim_frame += 1
         self._tick_buildings()
+        self._tick_research()
         self._tick_demolish()
         self._update_camera()
         if self.placing or self.show_help or self.show_backpack or self.show_building_panel or self.show_tech_tree:
