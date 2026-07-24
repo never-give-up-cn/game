@@ -13,7 +13,7 @@ register_building("苹果工厂", AppleFactory)
 from crafting import MANUAL_RECIPES, get_craftable_manual
 from backpack.ui import draw_backpack_ui
 from building.panel_ui import draw_building_interaction
-from tech_tree import TECH_NODES, get_available, max_plugin_tier, get_building_bonuses
+from tech_tree import TECH_NODES, get_available, max_plugin_tier, get_building_bonuses, ResearchQueue
 from player import Player
 
 
@@ -142,6 +142,7 @@ class GameWindow:
         self.show_tech_tree = False       # 科技树
         self.panel_building = None        # 当前打开的建筑
         self.tech_unlocked: set = set()   # 已解锁科技 ID 集合
+        self.research_queue = ResearchQueue()
 
         # 拆除状态（长按展示进度条）
         self.demolish_target = None  # 正在拆除的建筑
@@ -393,19 +394,6 @@ class GameWindow:
                 self.show_building_panel = False
                 self.show_tech_tree = True
 
-    def _click_tech_tree(self, pos):
-        """科技树点击 - 解锁节点"""
-        mx, my = pos
-        for rect, node in getattr(self, '_tech_buttons', []):
-            if rect.collidepoint(pos):
-                inv = self.player.inventory
-                if node.can_unlock(inv, self.tech_unlocked):
-                    node.unlock(inv)
-                    self.tech_unlocked.add(node.node_id)
-                    self._msg(f"解锁: {node.name}")
-                else:
-                    self._msg(f"材料不足或前置未解锁")
-                return
 
     def _cancel_demolish(self):
         """取消拆除（松开右键或移开鼠标）"""
@@ -934,174 +922,149 @@ class GameWindow:
 
     # ========== 科技树 ==========
 
+    # ========== 研究窗口（三栏） ==========
+
     def _draw_tech_tree(self):
         if not self.show_tech_tree:
             return
         inv = self.player.inventory
         mx, my = pygame.mouse.get_pos()
-
-        # 半透明背景
         overlay = pygame.Surface((WIN_WIDTH, WIN_HEIGHT), pygame.SRCALPHA)
         overlay.fill((10, 10, 15, 240))
         self.screen.blit(overlay, (0, 0))
-
-        title = self.font_large.render("科 技 树", True, COLOR_HIGHLIGHT)
-        self.screen.blit(title, (WIN_WIDTH//2 - title.get_width()//2, 25))
-
-        # ── 树形布局计算 ──
-        NODE_W = 190
-        TIER_GAP = 120
-        COL_SPACING = NODE_W + 30
-
-        # 按 tier 分组
-        tiers: Dict[int, List] = {}
-        for n in TECH_NODES.values():
-            tiers.setdefault(n.tier, []).append(n)
-
-        # 计算每个节点的 (col, row) 位置
-        # col: 水平偏移(整型), row: tier-1
-        layout = {}  # node_id -> (col, row)
-
-        # 根节点 (T1) 放在 col=0
-        for n in tiers.get(1, []):
-            layout[n.node_id] = (0, 0)
-
-        # 逐层向下分配子节点列位置
-        for tier in range(2, 6):
-            for node in tiers.get(tier, []):
-                # 获取所有已布局的父节点列
-                parent_cols = []
-                for pid in node.parent_ids:
-                    if pid in layout:
-                        parent_cols.append(layout[pid][0])
-                if parent_cols:
-                    # 子节点放在父节点平均列（可处理双父合并）
-                    avg_col = sum(parent_cols) / len(parent_cols)
-                    col = int(avg_col)
-                    # 如果平均列不是整数，保留半列偏移以便居中
-                    if avg_col % 1 != 0:
-                        col = avg_col  # 允许半列
-                else:
-                    # 无父节点(通常不会发生)，顺序排列
-                    siblings = tiers.get(tier, [])
-                    idx = siblings.index(node)
-                    total = len(siblings)
-                    col = idx - (total - 1) / 2
-                layout[node.node_id] = (col, tier - 1)
-
-        # 计算屏幕坐标
-        def node_pos(node_id):
-            col, row = layout.get(node_id, (0, 0))
-            cx = WIN_WIDTH // 2 + int(col * COL_SPACING)
-            cy = 70 + row * TIER_GAP
-            return cx, cy
-
-        # ── 计算每个节点的动态高度（依赖资源行数）──
-        node_heights = {}
-        for node in TECH_NODES.values():
-            n_req = len(node.requirements)
-            node_heights[node.node_id] = 56 + n_req * 18 + 4
-
-        # ── 绘制连线（使用动态节点高度）──
-        for node in TECH_NODES.values():
-            cx, cy = node_pos(node.node_id)
-            nh = node_heights.get(node.node_id, 62)
-            for pid in node.parent_ids:
-                if pid not in layout:
-                    continue
-                px, py = node_pos(pid)
-                ph = node_heights.get(pid, 62)
-                start = (px, py + ph // 2)
-                end = (cx, cy - nh // 2)
-                mid_y = (start[1] + end[1]) // 2
-                color = (80, 120, 80) if pid in self.tech_unlocked else (50, 50, 55)
-                pygame.draw.line(self.screen, color, start, (start[0], mid_y), 2)
-                pygame.draw.line(self.screen, color, (start[0], mid_y), (end[0], mid_y), 2)
-                pygame.draw.line(self.screen, color, (end[0], mid_y), end, 2)
-
-        # ── 绘制节点卡片（文字堆叠：名称 → 效果 → 资源 xN）──
+        title = self.font_large.render("研 究 窗 口  [T 关闭]", True, COLOR_HIGHLIGHT)
+        self.screen.blit(title, (WIN_WIDTH//2 - title.get_width()//2, 20))
         self._tech_buttons = []
-        for node in TECH_NODES.values():
-            cx, cy = node_pos(node.node_id)
-            nh = node_heights.get(node.node_id, 62)
-            rx, ry = cx - NODE_W // 2, cy - nh // 2
-            rect = pygame.Rect(rx, ry, NODE_W, nh)
+        lw = 210
+        self._draw_research_info(inv, mx, my, 6, 48, lw-6, 190)
+        self._draw_tech_list(inv, mx, my, 6, 242, lw-6, WIN_HEIGHT-256)
+        self._draw_tree_view(inv, mx, my, lw+8, 48, WIN_WIDTH-lw-14, WIN_HEIGHT-60)
 
+    def _draw_research_info(self, inv, mx, my, px, py, pw, ph):
+        pygame.draw.rect(self.screen, (16,18,28), (px,py,pw,ph), border_radius=6)
+        pygame.draw.rect(self.screen, (40,50,65), (px,py,pw,ph), 1, border_radius=6)
+        self.screen.blit(self.font_small.render("\U0001f4d6 当前研究", True, COLOR_HIGHLIGHT), (px+10, py+6))
+        rq = self.research_queue; yy = py + 26
+        if rq.current_node:
+            n = rq.current_node
+            self.screen.blit(self.font_small.render(n.name, True, COLOR_HIGHLIGHT), (px+12, yy)); yy+=20
+            for sid, cnt in n.science_packs.items():
+                from item import ITEM_TEMPLATES as _it2
+                t = _it2.get(sid); ic = t.icon if t else "?"; mn = t.name if t else sid
+                hv = inv.count(sid); c = COLOR_TEXT if hv>=cnt else (255,170,60)
+                self.screen.blit(self.font_small.render(f"{ic} {mn} {hv}/{cnt}", True, c), (px+14, yy)); yy+=16
+            bw, bh = pw-16, 8; bx = px+8; prog = rq.progress
+            pygame.draw.rect(self.screen, (20,24,35), (bx,yy,bw,bh), border_radius=4)
+            if prog>0:
+                pygame.draw.rect(self.screen, (80,200,120), (bx,yy,int(bw*prog),bh), border_radius=4)
+            pygame.draw.rect(self.screen, (50,60,75), (bx,yy,bw,bh), 1, border_radius=4)
+            pct = self.font_small.render(f"{int(prog*100)}%", True, COLOR_TEXT_DIM)
+            self.screen.blit(pct, (bx+bw-pct.get_width()-2, yy-1)); yy+=bh+6
+            if n.rewards:
+                self.screen.blit(self.font_small.render(f"\U0001f3c6 {n.rewards}", True, COLOR_TEXT_DIM), (px+12, yy))
+        else:
+            self.screen.blit(self.font_small.render("  未开始研究", True, COLOR_TEXT_DIM), (px+14, yy)); yy+=18
+            self.screen.blit(self.font_small.render("  点击科技树节点添加到队列", True, COLOR_TEXT_DIM), (px+14, yy))
+        yy = max(yy+8, py+ph-80)
+        self.screen.blit(self.font_small.render(f"队列 ({len(rq.queue)}/6)", True, COLOR_HIGHLIGHT), (px+10, yy)); yy+=18
+        for i, tid in enumerate(rq.queue[:6]):
+            n2 = TECH_NODES.get(tid)
+            if n2:
+                self.screen.blit(self.font_small.render(f"  {i+1}. {n2.name}", True, COLOR_TEXT_DIM), (px+12, yy)); yy+=16
+        if not rq.queue:
+            self.screen.blit(self.font_small.render("  (空)", True, COLOR_TEXT_DIM), (px+14, yy))
+
+    def _draw_tech_list(self, inv, mx, my, px, py, pw, ph):
+        pygame.draw.rect(self.screen, (16,18,28), (px,py,pw,ph), border_radius=6)
+        pygame.draw.rect(self.screen, (40,50,65), (px,py,pw,ph), 1, border_radius=6)
+        self.screen.blit(self.font_small.render("\U0001f52c 全部科技", True, COLOR_HIGHLIGHT), (px+8, py+6))
+        ss, gp = 34, 3; cols = 5
+        for idx, node in enumerate(TECH_NODES.values()):
+            sx = px+5+(idx%cols)*(ss+gp); sy = py+26+(idx//cols)*(ss+gp)
+            sr = pygame.Rect(sx, sy, ss, ss)
+            unlocked = node.node_id in self.tech_unlocked
+            can = node.can_unlock(inv, self.tech_unlocked)
+            bg = (30,60,30) if unlocked else ((50,60,40) if can else (25,25,30))
+            bd = (80,180,80) if unlocked else ((120,200,80) if can else (40,40,50))
+            pygame.draw.rect(self.screen, bg, sr, border_radius=4)
+            pygame.draw.rect(self.screen, bd, sr, 1, border_radius=4)
+            txt = self.font_small.render(node.name[:2], True, COLOR_TEXT if unlocked or can else COLOR_TEXT_DIM)
+            self.screen.blit(txt, (sx+4, sy+6))
+            if can:
+                self._tech_buttons.append((sr, node, 'list'))
+
+    def _draw_tree_view(self, inv, mx, my, px, py, pw, ph):
+        pygame.draw.rect(self.screen, (12,14,22), (px,py,pw,ph), border_radius=6)
+        pygame.draw.rect(self.screen, (30,40,55), (px,py,pw,ph), 1, border_radius=6)
+        self.screen.blit(self.font_small.render("\U0001f9ec 科技树", True, COLOR_HIGHLIGHT), (px+12, py+8))
+        NW, TG = 160, 100; CS = NW+25
+        tiers = {}
+        for n in TECH_NODES.values(): tiers.setdefault(n.tier, []).append(n)
+        layout = {}
+        for n in tiers.get(1,[]): layout[n.node_id] = (0,0)
+        for t in range(2,6):
+            for node in tiers.get(t,[]):
+                pc = [layout[pid][0] for pid in node.parent_ids if pid in layout]
+                if pc: a = sum(pc)/len(pc); col = int(a) if a%1==0 else a
+                else: sib = tiers.get(t,[]); i = sib.index(node); col = i-(len(sib)-1)/2
+                layout[node.node_id] = (col, t-1)
+        ox, oy = px+pw//2, py+50
+        def np(nid): c,r = layout.get(nid,(0,0)); return int(ox+c*CS), int(oy+r*TG)
+        for node in TECH_NODES.values():
+            cx,cy = np(node.node_id)
+            for pid in node.parent_ids:
+                if pid not in layout: continue
+                px2,py2 = np(pid); col = (80,120,80) if pid in self.tech_unlocked else (50,50,55)
+                my2 = (py2+25+cy-25)//2
+                pygame.draw.line(self.screen, col, (px2,py2+25),(px2,my2),2)
+                pygame.draw.line(self.screen, col, (px2,my2),(cx,my2),2)
+                pygame.draw.line(self.screen, col, (cx,my2),(cx,cy-25),2)
+        for node in TECH_NODES.values():
+            cx,cy = np(node.node_id); nh = 50+len(node.science_packs)*16
+            rx,ry = cx-NW//2, cy-nh//2; rect = pygame.Rect(rx,ry,NW,nh)
             unlocked = node.node_id in self.tech_unlocked
             can = node.can_unlock(inv, self.tech_unlocked)
             parents_ok = all(p in self.tech_unlocked for p in node.parent_ids)
-            hover = rect.collidepoint(mx, my)
-            reqs = list(node.requirements.items())
-
-            # 背景色
-            if unlocked:
-                bg = (35, 65, 35)
-                border = (80, 160, 80)
-            elif can:
-                bg = (55, 70, 40) if hover else (40, 55, 35)
-                border = (120, 200, 80) if hover else (70, 120, 50)
-            elif parents_ok:
-                bg = (40, 30, 25) if hover else (30, 25, 20)
-                border = (80, 60, 40)
-            else:
-                bg = (25, 25, 30)
-                border = COLOR_HOTBAR_BORDER
-
+            hover = rect.collidepoint(mx,my)
+            is_cur = self.research_queue.current == node.node_id
+            if unlocked: bg,bd = (35,65,35),(80,160,80)
+            elif is_cur: bg,bd = (55,55,30),(200,200,60)
+            elif can: bg = (55,60,40) if hover else (40,50,35); bd = (120,200,80) if hover else (70,120,50)
+            elif parents_ok: bg = (40,30,25) if hover else (30,25,20); bd = (80,60,40)
+            else: bg,bd = (25,25,30),(40,40,50)
             pygame.draw.rect(self.screen, bg, rect, border_radius=6)
-            pygame.draw.rect(self.screen, border, rect, 2, border_radius=6)
+            pygame.draw.rect(self.screen, bd, rect, 2, border_radius=6)
+            st = "✓" if unlocked else ("▶" if can else "\U0001f512")
+            sc = COLOR_HIGHLIGHT if unlocked else ((150,255,150) if can else COLOR_TEXT_DIM)
+            self.screen.blit(self.font.render(f"{st} {node.name}", True, sc), (rx+8, ry+4))
+            self.screen.blit(self.font_small.render(f"T{node.tier}", True, COLOR_TEXT_DIM), (rx+NW-24, ry+6))
+            yy = ry+24
+            for sid, cnt in node.science_packs.items():
+                from item import ITEM_TEMPLATES as _it2
+                t = _it2.get(sid); ic = t.icon if t else "?"; mn = t.name if t else sid
+                hv = inv.count(sid); c = COLOR_TEXT if hv>=cnt else (255,170,60)
+                self.screen.blit(self.font_small.render(f"{ic} {hv}/{cnt}", True, c), (rx+10, yy)); yy+=16
+            if can and not is_cur: self._tech_buttons.append((rect, node, 'tree'))
 
-            y_off = ry + 6
+    def _click_tech_tree(self, pos):
+        """添加到研究队列"""
+        for rect, node, source in getattr(self, '_tech_buttons', []):
+            if rect.collidepoint(pos):
+                if node.node_id in self.tech_unlocked:
+                    self._msg(f"{node.name} 已完成"); return
+                if not all(p in self.tech_unlocked for p in node.parent_ids):
+                    self._msg("前置科技未完成"); return
+                rq = self.research_queue
+                if rq.current is None:
+                    rq.current = node.node_id; rq.progress = 0.0
+                    self._msg(f"开始研究: {node.name}")
+                elif len(rq.queue) < 6:
+                    rq.add(node.node_id)
+                    self._msg(f"加入队列: {node.name} ({len(rq.queue)}/6)")
+                else:
+                    self._msg("队列已满 (最多6个)")
+                return
 
-            # 行 1: 状态 + 名称 + 等级标签
-            st = "✓" if unlocked else ("▶" if can else "🔒")
-            sc = COLOR_HIGHLIGHT if unlocked else ((150, 255, 150) if can else COLOR_TEXT_DIM)
-            name_surf = self.font.render(f"{st} {node.name}", True, sc)
-            self.screen.blit(name_surf, (rx + 8, y_off))
-            # tier 标签（右上角）
-            tier_tag = self.font_small.render(f"T{node.tier}", True, COLOR_TEXT_DIM)
-            self.screen.blit(tier_tag, (rect.right - tier_tag.get_width() - 8, y_off + 2))
-            y_off += 22
-
-            # 行 2: 效果描述
-            desc = self.font_small.render(node.description, True, COLOR_TEXT_DIM)
-            self.screen.blit(desc, (rx + 8, y_off))
-            y_off += 18
-
-            # 行 3+: 资源存量 / 需求（逐行扫视）
-            if not unlocked:
-                for mid, amt in reqs:
-                    from item import ITEM_TEMPLATES as _it2
-                    tmpl = _it2.get(mid)
-                    mn = tmpl.name if tmpl else mid
-                    hv = inv.count(mid)
-                    enough = hv >= amt
-                    color = COLOR_TEXT if enough else (255, 80, 80)
-
-                    # 文字: "资源名  存量/需求"
-                    line = self.font_small.render(f"{mn}  {hv}/{amt}", True, color)
-                    self.screen.blit(line, (rx + 12, y_off))
-
-                    # 微型进度条（视觉辅助）
-                    bar_w = 40
-                    bar_h = 4
-                    bar_x = rect.right - bar_w - 10
-                    bar_y = y_off + 4
-                    ratio = min(1.0, hv / max(amt, 1))
-                    pygame.draw.rect(self.screen, (40, 30, 30), (bar_x, bar_y, bar_w, bar_h))
-                    if ratio > 0:
-                        bc = (80, 200, 80) if enough else (200, 60, 60)
-                        pygame.draw.rect(self.screen, bc, (bar_x, bar_y, int(bar_w * ratio), bar_h))
-                    y_off += 18
-
-            if can:
-                self._tech_buttons.append((rect, node))
-
-        # 底部提示
-        if self._tech_buttons:
-            hint = self.font_small.render("🖱 点击绿色节点解锁  |  ESC 关闭", True, COLOR_TEXT_DIM)
-        else:
-            hint = self.font_small.render("无可用解锁项目  |  ESC 关闭", True, COLOR_TEXT_DIM)
-        self.screen.blit(hint, (60, WIN_HEIGHT - 30))
 
     def _draw_help(self):
         if not self.show_help:

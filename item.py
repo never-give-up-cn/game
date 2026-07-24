@@ -42,6 +42,15 @@ ITEM_TEMPLATES: Dict[str, Item] = {
     # 特殊
     "key":      Item("key",      "钥匙",  "K", "key", "开启特殊建筑", max_stack=5),
     "gold":     Item("gold",     "金币",  "$", "currency", "通用货币", max_stack=9999),
+
+    # 科研瓶
+    "science_red":   Item("science_red",   "红色科研瓶", "🔬", "science", "自动化科技"),
+    "science_green": Item("science_green", "绿色科研瓶", "🧪", "science", "物流科技"),
+    "science_blue":  Item("science_blue",  "蓝色科研瓶", "💧", "science", "化工科技"),
+    "science_black": Item("science_black", "黑色科研瓶", "🛡", "science", "军事科技"),
+    "science_purple":Item("science_purple","紫色科研瓶", "⚡", "science", "生产科技"),
+    "science_yellow":Item("science_yellow","黄色科研瓶", "💡", "science", "实用科技"),
+    "science_white": Item("science_white", "白色科研瓶", "⭐", "science", "太空科技"),
 }
 
 
