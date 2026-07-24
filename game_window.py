@@ -635,9 +635,19 @@ class GameWindow:
             self._msg(f"失败: {e}")
 
     def _tick_buildings(self):
+        """按顺序 tick: 分流器 → 传送带 → 机械臂 → 工厂"""
         inv = self.player.inventory
-        for b in self.game_map.buildings[:]:
-            b.tick(inv)
+        from conveyor import Splitter, ConveyorBelt
+        from inserter import Inserter
+        for b in self.game_map.buildings:
+            if isinstance(b, Splitter): b.tick(inv)
+        for b in self.game_map.buildings:
+            if isinstance(b, ConveyorBelt): b.tick(inv)
+        for b in self.game_map.buildings:
+            if isinstance(b, Inserter): b.tick(inv)
+        for b in self.game_map.buildings:
+            if not isinstance(b, (Splitter, ConveyorBelt, Inserter)):
+                b.tick(inv)
 
     def _tick_research(self):
         """每帧推进研究进度"""
