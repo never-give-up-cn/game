@@ -578,26 +578,27 @@ class GameWindow:
             exc = self.font_small.render("!", True, (30, 30, 35))
             self.screen.blit(exc, (rect.right - 10, rect.top + 1))
 
-        # 机械臂方向箭头
+        # 方向箭头（机械臂 / 传送带 / 地下）
         if bld and hasattr(bld, 'direction'):
             cx2 = rect.centerx
             cy2 = rect.centery
-            dir_angle = bld.direction * 90  # 0=up, 1=right, 2=down, 3=left
+            dir_angle = bld.direction * 90
             import math as m2
             rad = m2.radians(dir_angle)
-            # 箭头线
+            # 颜色：机械臂=金色 传送带=按等级
+            if hasattr(bld, 'belt_tier'):
+                tier_colors = [(220, 200, 60), (220, 100, 60), (60, 160, 240)]
+                arrow_c = tier_colors[min(bld.belt_tier, 3) - 1]
+            else:
+                arrow_c = (255, 220, 80)  # 机械臂金色
             end_x = cx2 + int(12 * m2.sin(rad))
             end_y = cy2 - int(12 * m2.cos(rad))
-            pygame.draw.line(self.screen, (255, 220, 80), (cx2, cy2), (end_x, end_y), 3)
-            # 箭头头部
+            pygame.draw.line(self.screen, arrow_c, (cx2, cy2), (end_x, end_y), 3)
             tip_size = 5
-            a1 = dir_angle + 150
-            a2 = dir_angle - 150
-            for a in (a1, a2):
-                r2 = m2.radians(a)
-                tx = end_x + int(tip_size * m2.sin(r2))
-                ty = end_y - int(tip_size * m2.cos(r2))
-                pygame.draw.line(self.screen, (255, 220, 80), (end_x, end_y), (tx, ty), 2)
+            for a in (dir_angle + 150, dir_angle - 150):
+                tx = end_x + int(tip_size * m2.sin(m2.radians(a)))
+                ty = end_y - int(tip_size * m2.cos(m2.radians(a)))
+                pygame.draw.line(self.screen, arrow_c, (end_x, end_y), (tx, ty), 2)
 
     def _draw_player(self):
         cx = self.player.x * TILE_SIZE + TILE_SIZE // 2
