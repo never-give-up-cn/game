@@ -53,11 +53,12 @@ class ConveyorBelt(BuildingBase):
         for b in self.game_map.buildings:
             if (b.x, b.y) != (fx, fy): continue
             if isinstance(b, ConveyorBelt):
-                bfx, bfy = b.front_pos
-                if (bfx, bfy) == (self.x, self.y):
+                # 下游入口方向必须指向自己
+                dx_b, dy_b = DIR_VEC[b.direction]
+                entry_x, entry_y = b.x - dx_b, b.y - dy_b
+                if (entry_x, entry_y) == (self.x, self.y):
                     return b
             elif isinstance(b, Splitter):
-                # 分流器入口: 其方向的反方向必须指向自己
                 sdx, sdy = DIR_VEC[b.direction]
                 entry_x, entry_y = b.x - sdx, b.y - sdy
                 if (entry_x, entry_y) == (self.x, self.y):

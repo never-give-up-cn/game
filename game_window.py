@@ -890,7 +890,7 @@ class GameWindow:
                 ty = end_y - int(tip_size * m2.cos(m2.radians(a)))
                 pygame.draw.line(self.screen, arrow_c, (end_x, end_y), (tx, ty), 2)
 
-        # 传送带物品渲染 (progress 模型)
+        # 传送带物品渲染 (按索引等距排队)
         if bld and (hasattr(bld, 'lanes') or hasattr(bld, 'is_conveyor')):
             from item import ITEM_TEMPLATES as _belt_it
             dir_angle = bld.direction * 90
@@ -899,8 +899,9 @@ class GameWindow:
             cy2 = rect.centery
             for lane_name, off in [("left", -6), ("right", 6)]:
                 lane = bld.lanes.get(lane_name, [])
-                for item in lane:
-                    progress = item.get("p", 0.0)
+                n = len(lane)
+                for idx, item in enumerate(lane):
+                    progress = (idx + 1) / (n + 1) if n > 0 else 0
                     px = cx2 + int((progress - 0.5) * 16 * math.sin(rad))
                     py = cy2 - int((progress - 0.5) * 16 * math.cos(rad))
                     lx = px + int(off * math.cos(rad))
