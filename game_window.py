@@ -61,6 +61,17 @@ BUILDING_ACCENT: Dict[str, Tuple[int, int, int]] = {
 }
 BUILDING_NAMES = list(BUILDING_TEMPLATES.keys())
 
+# 物品 -> 建筑映射（选中该物品时左键点击地图放置对应建筑）
+ITEM_TO_BUILDING = {
+    "wood": "住宅",
+    "stone": "城墙",
+    "iron": "工厂",
+    "steel": "研究所",
+    "coal": "仓库",
+}
+
+DEMOLISH_CD_FRAMES = FPS * 2  # 右键拆除冷却 2 秒
+
 
 class GameWindow:
     """图形窗口游戏"""
@@ -104,9 +115,17 @@ class GameWindow:
 
         # 消息
         self.messages: List[Tuple[str, int]] = []
-        self._msg("WASD 移动 | B 放置 | H 帮助 | Q 退出")
+        self._msg("WASD 移动 | 左键放置 | 右键拆除 | H 帮助")
 
         self.show_help = False
+
+        # 拆除冷却
+        self.demolish_cd = 0
+
+        # 鼠标状态
+        self.mouse_grid_pos: Tuple[int, int] = (-1, -1)  # 鼠标所在的格子
+        self.mouse_in_map = False
+        self.hover_slot_idx = -1  # 悬浮在哪个背包格子上
 
     def _make_font(self, size: int):
         """从系统字体文件加载中文字体"""
@@ -149,6 +168,13 @@ class GameWindow:
                 self._on_keydown(event.key)
             elif event.type == pygame.KEYUP:
                 self.keys_down[event.key] = False
+            elif event.type == pygame.MOUSEMOTION:
+                self._on_mouse_move(event.pos)
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 1:     # 左键
+                    self._on_left_click(event.pos)
+                elif event.button == 3:   # 右键
+                    self._on_right_click(event.pos)
 
     def _on_keydown(self, key: int):
         if key == pygame.K_q:
@@ -191,6 +217,97 @@ class GameWindow:
             if idx < len(inv.slots):
                 inv.selected = idx
 
+    def _on_mouse_move(self, pos: Tuple[int, int]):
+        """更新鼠标所在的格子坐标和悬浮索引"""
+        mx, my = pos
+        # 地图格子
+        if 0 <= mx < MAP_COLS * TILE_SIZE and 0 <= my < MAP_HEIGHT:
+            gx = mx // TILE_SIZE
+            gy = my // TILE_SIZE
+            self.mouse_grid_pos = (gx, gy)
+            self.mouse_in_map = True
+        else:
+            self.mouse_in_map = False
+        # 背包格子
+        self.hover_slot_idx = self._get_clicked_slot(pos)
+
+    def _get_clicked_slot(self, pos: Tuple[int, int]) -> int:
+        """检测鼠标点击了哪个背包格子，返回索引 (-1 = 未命中)"""
+        mx, my = pos
+        bar_rect = pygame.Rect(0, MAP_HEIGHT, MAP_COLS * TILE_SIZE, HOTBAR_HEIGHT)
+        if not bar_rect.collidepoint(mx, my):
+            return -1
+        # 计算格子参数 (与 _draw_hotbar 保持一致)
+        slots_per_row = 8
+        slot_rows = 2
+        cell_w = 56
+        cell_h = 44
+        gap = 6
+        total_w = slots_per_row * (cell_w + gap) - gap
+        bar_x0 = bar_rect.x + (bar_rect.width - total_w) // 2
+        bar_y0 = bar_rect.y + 6
+
+        for idx in range(slots_per_row * slot_rows):
+            row = idx // slots_per_row
+            col = idx % slots_per_row
+            cx = bar_x0 + col * (cell_w + gap)
+            cy = bar_y0 + row * (cell_h + gap)
+            if cx <= mx <= cx + cell_w and cy <= my <= cy + cell_h:
+                return idx
+        return -1
+
+    def _on_left_click(self, pos: Tuple[int, int]):
+        """鼠标左键：选中背包 / 放置建筑"""
+        # 先检测是否点击在背包栏
+        slot = self._get_clicked_slot(pos)
+        if slot >= 0:
+            inv = self.player.inventory
+            if slot < len(inv.slots) and inv.slots[slot] is not None:
+                inv.selected = slot
+                return
+
+        # 再检测是否点击在地图格子上
+        mx, my = pos
+        if 0 <= mx < MAP_COLS * TILE_SIZE and 0 <= my < MAP_HEIGHT:
+            gx = mx // TILE_SIZE
+            gy = my // TILE_SIZE
+            self._place_with_selected(gx, gy)
+
+    def _on_right_click(self, pos: Tuple[int, int]):
+        """鼠标右键：拆除建筑（有冷却）"""
+        mx, my = pos
+        if 0 <= mx < MAP_COLS * TILE_SIZE and 0 <= my < MAP_HEIGHT:
+            gx = mx // TILE_SIZE
+            gy = my // TILE_SIZE
+            # 查找该位置是否有建筑
+            for b in self.game_map.buildings:
+                if b.x <= gx < b.x + b.w and b.y <= gy < b.y + b.h:
+                    if self.demolish_cd > 0:
+                        self._msg(f"拆除冷却中 ({self.demolish_cd//FPS+1}s)")
+                        return
+                    self.game_map.remove_building(b)
+                    self.demolish_cd = DEMOLISH_CD_FRAMES
+                    self._msg(f"拆除 {b.name} 于 ({b.x},{b.y})")
+                    return
+            self._msg("该位置没有建筑")
+
+    def _place_with_selected(self, gx: int, gy: int):
+        """根据选中的背包物品放置对应建筑"""
+        sel = self.player.selected_slot
+        if not sel:
+            self._msg("请先选择背包中的物品")
+            return
+        bld_name = ITEM_TO_BUILDING.get(sel.item_id)
+        if not bld_name:
+            self._msg(f"{sel.name} 不能用于建造")
+            return
+        try:
+            b = Building(gx, gy, bld_name)
+            self.game_map.add_building(b)
+            self._msg(f"放置 {b.name} 于 ({b.x},{b.y})")
+        except ValueError as e:
+            self._msg(f"放置失败: {e}")
+
     def _place_key(self, key: int):
         if key == pygame.K_TAB:
             self.place_idx = (self.place_idx + 1) % len(BUILDING_NAMES)
@@ -213,8 +330,14 @@ class GameWindow:
         except ValueError as e:
             self._msg(f"失败: {e}")
 
+    def _tick_cd(self):
+        """每帧减少冷却"""
+        if self.demolish_cd > 0:
+            self.demolish_cd -= 1
+
     def _update_movement(self):
         """每帧根据持续按住的键移动（支持斜向）"""
+        self._tick_cd()
         if self.placing or self.show_help:
             return
 
@@ -369,6 +492,33 @@ class GameWindow:
             c = COLOR_HIGHLIGHT if valid else (255, 80, 80)
             self.screen.blit(self.font.render(line, True, c), (18, MAP_HEIGHT - INFO_HEIGHT - 6 + i * 22))
 
+    def _draw_mouse_ghost(self):
+        """在地图上绘制建筑预览虚影（跟随鼠标）"""
+        if not self.mouse_in_map or self.placing:
+            return
+        sel = self.player.selected_slot
+        if not sel:
+            return
+        bld_name = ITEM_TO_BUILDING.get(sel.item_id)
+        if not bld_name:
+            return
+
+        gx, gy = self.mouse_grid_pos
+        tmpl = BUILDING_TEMPLATES[bld_name]
+        w, h = tmpl["width"], tmpl["height"]
+        valid = self.game_map.area_free(gx, gy, w, h)
+        color = (0, 220, 0, 60) if valid else (220, 0, 0, 60)
+        border_color = (0, 255, 0) if valid else (255, 0, 0)
+
+        for dx in range(w):
+            for dy in range(h):
+                rect = pygame.Rect((gx + dx) * TILE_SIZE, (gy + dy) * TILE_SIZE,
+                                   TILE_SIZE, TILE_SIZE)
+                s = pygame.Surface((TILE_SIZE, TILE_SIZE), pygame.SRCALPHA)
+                s.fill(color)
+                self.screen.blit(s, rect)
+                pygame.draw.rect(self.screen, border_color, rect, 2)
+
     def _draw_messages(self):
         y = MAP_HEIGHT - 30
         keep = []
@@ -405,10 +555,14 @@ class GameWindow:
             slot_rect = pygame.Rect(cx, cy, cell_w, cell_h)
             stack = inv.slots[idx] if idx < len(inv.slots) else None
             is_selected = (idx == inv.selected and stack is not None)
+            is_hover = (idx == self.hover_slot_idx and not is_selected)
 
             if is_selected:
                 pygame.draw.rect(self.screen, COLOR_SLOT_SELECTED_BG, slot_rect)
                 pygame.draw.rect(self.screen, COLOR_SLOT_SELECTED, slot_rect, 2)
+            elif is_hover and stack:
+                pygame.draw.rect(self.screen, (70, 100, 140), slot_rect)
+                pygame.draw.rect(self.screen, COLOR_HIGHLIGHT, slot_rect, 2)
             elif stack:
                 pygame.draw.rect(self.screen, COLOR_SLOT_HOVER, slot_rect)
                 pygame.draw.rect(self.screen, COLOR_HOTBAR_BORDER, slot_rect, 1)
@@ -460,6 +614,9 @@ class GameWindow:
             "S + A         左下 (斜向)",
             "S + D         右下 (斜向)", "",
             "1 ~ 8         选择背包物品",
+            "左键背包格    选中物品",
+            "左键地图      放置建筑（需选中建造材料）",
+            "右键地图      拆除建筑（2秒冷却）",
             "B             打开 / 确认放置建筑",
             "TAB            切换建筑类型",
             "ESC            取消 / 关闭帮助",
@@ -494,6 +651,7 @@ class GameWindow:
             self._draw_sidebar()
             self._draw_hotbar()
             self._draw_placement()
+            self._draw_mouse_ghost()
             self._draw_messages()
             self._draw_help()
             pygame.display.flip()
