@@ -163,7 +163,7 @@ class GameWindow:
         self.mouse_grid_pos: Tuple[int, int] = (-1, -1)
         self.mouse_in_map = False
         self.hover_slot_idx = -1
-        self.hovered_ore = None  # 悬浮的矿物信息 (item_id, name, amount, max)
+        self.hovered_tile = None  # 悬浮的地图物体 {type, name, icon, details, pct}
 
     def _make_font(self, size: int):
         """从系统字体文件加载中文字体"""
@@ -289,27 +289,57 @@ class GameWindow:
             gy = my // TILE_SIZE + self.camera_y
             self.mouse_grid_pos = (gx, gy)
             self.mouse_in_map = True
-            # 悬浮在建筑上 -> 侧栏显示信息
+            # 悬浮检测: 建筑 > 资源 > 地形
             bld = self._building_at(gx, gy)
             if bld:
                 self.selected_building = bld
-                self.hovered_ore = None
-            else:
-                # 悬浮在矿物上
+                self.hovered_tile = None
+                return
+            self.selected_building = None
+
+            from resource_gen import get_planet_at
+            tile = self.game_map.get_tile(gx, gy)
+            info = {"planet": get_planet_at(gx, gy), "gx": gx, "gy": gy}
+
+            if tile == TileType.ORE:
                 ore_id = self.game_map.get_ore(gx, gy)
-                if ore_id:
+                node = self.game_map.resource_mgr.get_node_at(gx, gy)
+                if node:
                     from item import ITEM_TEMPLATES as _it
                     t = _it.get(ore_id)
-                    # 从 resource_mgr 获取储量信息
-                    node = self.game_map.resource_mgr.get_node_at(gx, gy)
-                    if node:
-                        self.hovered_ore = (ore_id, t.name if t else ore_id,
-                                           t.icon if t else "?", node.amount, node.max_amount)
-                        self.selected_building = None
-                    else:
-                        self.hovered_ore = None
+                    info.update({"type": "矿脉", "name": t.name if t else ore_id,
+                                 "icon": t.icon if t else "?",
+                                 "pct": node.amount / max(node.max_amount, 1),
+                                 "detail": f"储量: {node.amount:.0f}/{node.max_amount:.0f}"})
+            elif tile == TileType.FLUID:
+                ore_id = self.game_map.get_ore(gx, gy)
+                node = self.game_map.resource_mgr.get_node_at(gx, gy)
+                if node:
+                    from item import ITEM_TEMPLATES as _it
+                    t = _it.get(ore_id)
+                    info.update({"type": "流体", "name": t.name if t else "流体",
+                                 "icon": t.icon if t else "~",
+                                 "pct": node.amount / max(node.max_amount, 1),
+                                 "detail": f"储量: {node.amount:.0f}/{node.max_amount:.0f}"})
                 else:
-                    self.hovered_ore = None
+                    info.update({"type": "流体", "name": "熔岩/流体", "icon": "~",
+                                 "pct": 1.0, "detail": "无限资源"})
+            elif tile == TileType.BIO:
+                info.update({"type": "生物", "name": "真菌/植物", "icon": "%",
+                             "pct": 1.0, "detail": "Gleba 生物质"})
+            elif tile == TileType.TREE:
+                info.update({"type": "树木", "name": "树木", "icon": "t",
+                             "pct": 1.0, "detail": "可砍伐获得木材"})
+            elif tile == TileType.WATER:
+                info.update({"type": "水域", "name": "水", "icon": "w",
+                             "pct": 1.0, "detail": "可抽取无限水源"})
+            elif tile == TileType.WALL:
+                info.update({"type": "地形", "name": "废墟/岩石", "icon": "X",
+                             "pct": 1.0, "detail": "不可通行"})
+            elif tile == TileType.EMPTY:
+                info.update({"type": "空地", "name": f"{info['planet'].upper()}地表",
+                             "icon": ".", "pct": 1.0, "detail": "可建造"})
+            self.hovered_tile = info if len(info) > 2 else None
         else:
             self.mouse_in_map = False
         # 背包格子
@@ -729,23 +759,24 @@ class GameWindow:
                 y += 16
             y += 4
 
-        # 悬浮矿物详情
-        if self.hovered_ore:
-            oid, oname, oicon, oamt, omax = self.hovered_ore
-            pct = int(oamt / max(omax, 1) * 100)
+        # 悬浮地图物体详情
+        if self.hovered_tile:
+            h = self.hovered_tile
             self.screen.blit(
-                self.font_small.render(f"{oicon} {oname}  矿脉", True, (220, 200, 120)), (x, y))
+                self.font_small.render(f"{h['icon']} {h['name']}  [{h['type']}]", True, COLOR_HIGHLIGHT), (x, y))
             y += 18
             self.screen.blit(
-                self.font_small.render(f"  储量: {oamt:.0f}/{omax:.0f} ({pct}%)", True, COLOR_TEXT), (x, y))
+                self.font_small.render(f"  {h['detail']}", True, COLOR_TEXT), (x, y))
             y += 16
-            # 储量进度条
-            bw, bh = 80, 4
-            pygame.draw.rect(self.screen, (30, 25, 20), (x + 10, y, bw, bh))
-            ratio = oamt / max(omax, 1)
-            c = (80, 200, 80) if ratio > 0.3 else (200, 160, 60) if ratio > 0.1 else (200, 60, 60)
-            pygame.draw.rect(self.screen, c, (x + 10, y, int(bw * ratio), bh))
-            y += 10
+            # 储量进度条（仅矿脉/流体有）
+            pct = h.get('pct', 1.0)
+            if pct < 1.0:
+                bw, bh = 80, 4
+                pygame.draw.rect(self.screen, (30, 25, 20), (x + 10, y, bw, bh))
+                c = (80, 200, 80) if pct > 0.3 else (200, 160, 60) if pct > 0.1 else (200, 60, 60)
+                pygame.draw.rect(self.screen, c, (x + 10, y, int(bw * pct), bh))
+                y += 10
+            y += 4
 
         # 选中建筑详情（紧凑格式，同玩家信息）
         if self.selected_building:
