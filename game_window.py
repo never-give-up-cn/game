@@ -417,14 +417,14 @@ class GameWindow:
 
         x = x0 + 12
         y = 16
-        title = self.font_large.render("游戏信息", True, COLOR_HIGHLIGHT)
+        title = self.font_large.render("----", True, COLOR_HIGHLIGHT)
         self.screen.blit(title, (x, y))
         y += 32
 
         for line in [
-            f"玩家: {self.player.name}",
-            f"等级: Lv.{self.player.level}",
-            f"HP: {self.player.hp}/{self.player.max_hp}",
+            f"-: {self.player.name}",
+            f"-: Lv.{self.player.level}",
+            f"-: {self.player.hp}/{self.player.max_hp}",
             f"坐标: ({self.player.x}, {self.player.y})",
         ]:
             self.screen.blit(self.font.render(line, True, COLOR_TEXT), (x, y))
