@@ -9,7 +9,7 @@ if hasattr(sys.stdout, "buffer"):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
 from map_grid import MapGrid
-from building import Building
+from building import Building, list_templates
 from player import Player
 
 
@@ -87,7 +87,7 @@ def place_building_ui(game_map: MapGrid, player: Player):
     """放置建筑的用户交互"""
     clear_screen()
     print("  ┌─ 放置建筑 ──────────┐")
-    templates = Building.list_templates()
+    templates = list_templates()
     names = list(templates.keys())
 
     for i, name in enumerate(names, 1):

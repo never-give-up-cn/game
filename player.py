@@ -1,7 +1,8 @@
 """玩家/任务角色 - 在地图上移动"""
 
 from typing import Tuple, Optional
-from item import Inventory, ItemStack
+from item import ItemStack
+from backpack.inventory import Inventory
 
 
 class Player:
