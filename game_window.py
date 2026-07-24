@@ -70,7 +70,7 @@ ITEM_TO_BUILDING = {
     "coal": "仓库",
 }
 
-DEMOLISH_CD_FRAMES = FPS * 2  # 右键拆除冷却 2 秒
+DEMOLISH_TIME = FPS * 2  # 按住右键 2 秒拆除
 
 
 class GameWindow:
@@ -119,8 +119,10 @@ class GameWindow:
 
         self.show_help = False
 
-        # 拆除冷却
-        self.demolish_cd = 0
+        # 拆除状态（长按展示进度条）
+        self.demolish_target = None  # 正在拆除的建筑
+        self.demolish_frames = 0  # 已按住多少帧
+        self.right_held = False  # 右键是否按住
 
         # 鼠标状态
         self.mouse_grid_pos: Tuple[int, int] = (-1, -1)  # 鼠标所在的格子
@@ -173,8 +175,13 @@ class GameWindow:
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 1:     # 左键
                     self._on_left_click(event.pos)
-                elif event.button == 3:   # 右键
-                    self._on_right_click(event.pos)
+                elif event.button == 3:   # 右键按下 -> 开始拆除
+                    self.right_held = True
+                    self._on_right_down(event.pos)
+            elif event.type == pygame.MOUSEBUTTONUP:
+                if event.button == 3:     # 右键松开 -> 取消拆除
+                    self.right_held = False
+                    self._cancel_demolish()
 
     def _on_keydown(self, key: int):
         if key == pygame.K_q:
@@ -273,23 +280,27 @@ class GameWindow:
             gy = my // TILE_SIZE
             self._place_with_selected(gx, gy)
 
-    def _on_right_click(self, pos: Tuple[int, int]):
-        """鼠标右键：拆除建筑（有冷却）"""
+    def _building_at(self, gx: int, gy: int):
+        """返回 (gx,gy) 处的建筑，没有则返回 None"""
+        for b in self.game_map.buildings:
+            if b.x <= gx < b.x + b.w and b.y <= gy < b.y + b.h:
+                return b
+        return None
+
+    def _on_right_down(self, pos: Tuple[int, int]):
+        """右键按下：开始拆除建筑"""
         mx, my = pos
         if 0 <= mx < MAP_COLS * TILE_SIZE and 0 <= my < MAP_HEIGHT:
-            gx = mx // TILE_SIZE
-            gy = my // TILE_SIZE
-            # 查找该位置是否有建筑
-            for b in self.game_map.buildings:
-                if b.x <= gx < b.x + b.w and b.y <= gy < b.y + b.h:
-                    if self.demolish_cd > 0:
-                        self._msg(f"拆除冷却中 ({self.demolish_cd//FPS+1}s)")
-                        return
-                    self.game_map.remove_building(b)
-                    self.demolish_cd = DEMOLISH_CD_FRAMES
-                    self._msg(f"拆除 {b.name} 于 ({b.x},{b.y})")
-                    return
-            self._msg("该位置没有建筑")
+            gx, gy = mx // TILE_SIZE, my // TILE_SIZE
+            bld = self._building_at(gx, gy)
+            if bld:
+                self.demolish_target = bld
+                self.demolish_frames = 0
+
+    def _cancel_demolish(self):
+        """取消拆除（松开右键或移开鼠标）"""
+        self.demolish_target = None
+        self.demolish_frames = 0
 
     def _place_with_selected(self, gx: int, gy: int):
         """根据选中的背包物品放置对应建筑"""
@@ -330,14 +341,30 @@ class GameWindow:
         except ValueError as e:
             self._msg(f"失败: {e}")
 
-    def _tick_cd(self):
-        """每帧减少冷却"""
-        if self.demolish_cd > 0:
-            self.demolish_cd -= 1
+    def _tick_demolish(self):
+        """每帧推进拆除进度（按住右键时）"""
+        if not self.right_held or self.demolish_target is None:
+            return
+        # 检查鼠标是否还在同一个建筑上
+        mx, my = pygame.mouse.get_pos()
+        if not (0 <= mx < MAP_COLS * TILE_SIZE and 0 <= my < MAP_HEIGHT):
+            self._cancel_demolish()
+            return
+        gx, gy = mx // TILE_SIZE, my // TILE_SIZE
+        if self._building_at(gx, gy) is not self.demolish_target:
+            self._cancel_demolish()
+            return
+        self.demolish_frames += 1
+        if self.demolish_frames >= DEMOLISH_TIME:
+            bld = self.demolish_target
+            self._msg(f"拆除 {bld.name}")
+            self.game_map.remove_building(bld)
+            self._cancel_demolish()
+            self.right_held = False
 
     def _update_movement(self):
         """每帧根据持续按住的键移动（支持斜向）"""
-        self._tick_cd()
+        self._tick_demolish()
         if self.placing or self.show_help:
             return
 
@@ -519,6 +546,26 @@ class GameWindow:
                 self.screen.blit(s, rect)
                 pygame.draw.rect(self.screen, border_color, rect, 2)
 
+    def _draw_demolish_bar(self):
+        """绘制正在拆除的建筑上的进度条"""
+        if self.demolish_target is None or self.demolish_frames <= 0:
+            return
+        b = self.demolish_target
+        progress = self.demolish_frames / DEMOLISH_TIME
+        bar_w = b.w * TILE_SIZE - 4
+        bar_h = 5
+        bar_x = b.x * TILE_SIZE + 2
+        bar_y = b.y * TILE_SIZE - 8
+
+        # 背景（暗红）
+        pygame.draw.rect(self.screen, (50, 15, 15), (bar_x, bar_y, bar_w, bar_h))
+        # 进度（亮红）
+        fill = int(bar_w * progress)
+        if fill > 0:
+            pygame.draw.rect(self.screen, (255, 50, 50), (bar_x, bar_y, fill, bar_h))
+        # 边框
+        pygame.draw.rect(self.screen, (180, 30, 30), (bar_x, bar_y, bar_w, bar_h), 1)
+
     def _draw_messages(self):
         y = MAP_HEIGHT - 30
         keep = []
@@ -652,6 +699,7 @@ class GameWindow:
             self._draw_hotbar()
             self._draw_placement()
             self._draw_mouse_ghost()
+            self._draw_demolish_bar()
             self._draw_messages()
             self._draw_help()
             pygame.display.flip()
