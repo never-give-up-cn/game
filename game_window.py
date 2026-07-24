@@ -7,7 +7,7 @@ from typing import Dict, Tuple, List, Optional
 import pygame
 
 from map_grid import MapGrid, TileType
-from building import Building, BUILDING_TEMPLATES, register_building
+from building import Building, BUILDING_TEMPLATES, BUILDING_NAMES, register_building
 from building.apple_factory import AppleFactory
 from inserter import Inserter
 from conveyor import ConveyorBelt, UndergroundBelt, Splitter
