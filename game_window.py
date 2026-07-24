@@ -411,12 +411,17 @@ class GameWindow:
         if 0 <= mx < VIEWPORT_COLS * TILE_SIZE and 0 <= my < MAP_HEIGHT:
             gx = mx // TILE_SIZE + self.camera_x
             gy = my // TILE_SIZE + self.camera_y
-            # 先检查是否点击到建筑 → 弹窗
+            # 先检查是否点击到建筑
             bld = self._building_at(gx, gy)
             if bld:
-                self.panel_building = bld
                 self.selected_building = bld
-                self.show_building_panel = True
+                # 传送带/分流器等纯物流建筑不弹窗
+                if hasattr(bld, 'lanes') or hasattr(bld, 'input_buf'):
+                    self.panel_building = None
+                    self.show_building_panel = False
+                else:
+                    self.panel_building = bld
+                    self.show_building_panel = True
             elif self.player.selected_slot and self.player.selected_slot.item_id in ITEM_TO_BUILDING:
                 # 无建筑 + 有建造材料 → 放置
                 self._place_with_selected(gx, gy)
