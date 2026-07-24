@@ -456,7 +456,7 @@ class GameWindow:
         self.demolish_frames = 0
 
     def _place_with_selected(self, gx: int, gy: int):
-        """根据选中的背包物品放置对应建筑"""
+        """根据选中的背包物品放置对应建筑（消耗物品）"""
         sel = self.player.selected_slot
         if not sel:
             self._msg("请先选择背包中的物品")
@@ -468,7 +468,9 @@ class GameWindow:
         try:
             b = Building(gx, gy, bld_name)
             self.game_map.add_building(b)
-            self._msg(f"放置 {b.name} 于 ({b.x},{b.y})")
+            # 消耗一个建筑物品
+            self.player.inventory.remove_item(sel.item_id, 1)
+            self._msg(f"放置 {b.name} 于 ({b.x},{b.y}) (剩余{self.player.inventory.count(sel.item_id)})")
         except ValueError as e:
             self._msg(f"放置失败: {e}")
 
@@ -493,6 +495,12 @@ class GameWindow:
             self.placing = False
         except ValueError as e:
             self._msg(f"失败: {e}")
+
+    def _tick_buildings(self):
+        """每帧更新所有建筑（传送带物品移动等）"""
+        inv = self.player.inventory
+        for b in self.game_map.buildings[:]:
+            b.tick(inv)
 
     def _tick_demolish(self):
         """每帧推进拆除进度（按住右键时）"""
@@ -523,6 +531,7 @@ class GameWindow:
     def _update_movement(self):
         """每帧更新移动 + 相机跟随"""
         self.anim_frame += 1
+        self._tick_buildings()
         self._tick_demolish()
         self._update_camera()
         if self.placing or self.show_help or self.show_backpack or self.show_building_panel or self.show_tech_tree:
@@ -674,6 +683,26 @@ class GameWindow:
                 tx = end_x + int(tip_size * m2.sin(m2.radians(a)))
                 ty = end_y - int(tip_size * m2.cos(m2.radians(a)))
                 pygame.draw.line(self.screen, arrow_c, (end_x, end_y), (tx, ty), 2)
+
+        # 传送带物品渲染（双车道，物品缩小到 1/3 宽度）
+        if bld and hasattr(bld, 'lanes'):
+            from item import ITEM_TEMPLATES as _belt_it
+            dir_angle = bld.direction * 90
+            rad = math.radians(dir_angle)
+            cx2 = rect.centerx
+            cy2 = rect.centery
+            for lane_name, off in [("left", -6), ("right", 6)]:
+                lane = bld.lanes.get(lane_name, [])
+                for item_id, progress in lane:
+                    px = cx2 + int((progress - 0.5) * 16 * math.sin(rad))
+                    py = cy2 - int((progress - 0.5) * 16 * math.cos(rad))
+                    lx = px + int(off * math.cos(rad))
+                    ly = py + int(off * math.sin(rad))
+                    shades = {"iron": (140,140,160), "steel": (180,200,220),
+                              "coal": (60,60,60), "stone": (140,130,120),
+                              "iron_ore": (160,120,80), "copper_ore": (180,100,60)}
+                    ic = shades.get(item_id, (200,160,60))
+                    pygame.draw.circle(self.screen, ic, (int(lx), int(ly)), 5)
 
     def _draw_player(self):
         # 世界坐标 → 屏幕坐标（相机偏移）
