@@ -885,6 +885,8 @@ class GameWindow:
     # ========== 建筑面板 ==========
 
     def _draw_building_panel(self):
+        if not self.show_building_panel or not self.panel_building:
+            return
         draw_building_interaction(
             screen=self.screen,
             font=self.font,
