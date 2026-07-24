@@ -165,6 +165,7 @@ class MapGrid:
     def add_building(self, building: "BuildingBase"):
         if not self.area_free(building.x, building.y, building.w, building.h):
             raise ValueError(f"无法放置 {building.name}")
+        building.game_map = self  # 注入地图引用（机械臂等需要）
         self.buildings.append(building)
         for dx in range(building.w):
             for dy in range(building.h):
