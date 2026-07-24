@@ -119,7 +119,7 @@ class GameWindow:
 
         # 消息
         self.messages: List[Tuple[str, int]] = []
-        self._msg("WASD 移动 | 左键放置 | 右键拆除 | H 帮助")
+        self._msg("WASD 移动 | 左键建筑查看 | 右键拆除 | H 操作指南")
 
         self.show_help = False
         self.show_backpack = False   # E 键背包界面
@@ -1236,41 +1236,72 @@ class GameWindow:
         if not self.show_help:
             return
         s = pygame.Surface((WIN_WIDTH, WIN_HEIGHT), pygame.SRCALPHA)
-        s.fill((0, 0, 0, 200))
+        s.fill((0, 0, 0, 210))
         self.screen.blit(s, (0, 0))
 
-        lines = [
-            "操作帮助", "",
-            "W / ↑         向上",
-            "S / ↓         向下",
-            "A / ←         向左",
-            "D / →         向右",
-            "W + A         左上 (斜向)",
-            "W + D         右上 (斜向)",
-            "S + A         左下 (斜向)",
-            "S + D         右下 (斜向)", "",
-            "E             打开背包 / 合成界面",
-            "T             科技树",
-            "左键建筑      打开建筑面板",
-            "1 ~ 8         选择背包物品",
-            "左键背包格    选中物品",
-            "左键地图      放置建筑（需选中建造材料）",
-            "右键地图      拆除建筑（2秒冷却）",
-            "B             打开 / 确认放置建筑",
-            "TAB            切换建筑类型",
-            "ESC            取消 / 关闭帮助",
-            "H             帮助开关",
-            "Q             退出游戏",
+        title = self.font_large.render("操 作 指 南", True, COLOR_HIGHLIGHT)
+        self.screen.blit(title, (WIN_WIDTH // 2 - title.get_width() // 2, 28))
+
+        # 左中右三栏
+        col_x = [60, WIN_WIDTH // 2 - 50, WIN_WIDTH - 230]
+        col_w = 200
+
+        sections = [
+            ("移动", [
+                ("W / ↑",   "向上移动一格"),
+                ("S / ↓",   "向下移动一格"),
+                ("A / ←",   "向左移动一格"),
+                ("D / →",   "向右移动一格"),
+                ("W+A 等",  "同时按两个键斜向移动"),
+            ]),
+            ("采集与建造", [
+                ("左键地图",  "选中建造材料时放置建筑"),
+                ("左键建筑",  "打开建筑面板查看详情"),
+                ("右键建筑",  "按住 2 秒拆除（进度条）"),
+                ("B 键",     "键盘放置模式 / 确认"),
+                ("TAB",      "切换建筑类型"),
+            ]),
+            ("背包与合成", [
+                ("E 键",     "打开背包 / 合成界面"),
+                ("左键背包格", "选中该物品"),
+                ("1~8 数字键", "快速选择物品格"),
+                ("左键配方",  "消耗材料合成物品"),
+                ("T 键",     "科技树（消耗物品解锁）"),
+            ]),
+            ("视觉提示", [
+                ("呼吸光圈",  "角色所在格，脉冲光效"),
+                ("绿光边框",  "建筑正常生产中"),
+                ("橙光闪烁",  "建筑材料不足，停工"),
+                ("黄色三角!", "产品堆满，需要清理"),
+                ("黄色边框",  "当前选中的建筑"),
+            ]),
+            ("界面说明", [
+                ("右侧面板",  "点击边缘 > 折叠/展开"),
+                ("底部热栏",  "背包物品快捷栏"),
+                ("侧栏详情",  "选中建筑后显示生产信息"),
+                ("ESC",      "关闭当前面板"),
+                ("H 键",     "开关本指南"),
+            ]),
         ]
-        cx = WIN_WIDTH // 2
-        cy = WIN_HEIGHT // 2 - len(lines) * 13
-        for line in lines:
-            if line and line[0].isupper():
-                surf = self.font_large.render(line, True, COLOR_HIGHLIGHT)
-            else:
-                surf = self.font.render(line, True, COLOR_TEXT)
-            self.screen.blit(surf, (cx - surf.get_width() // 2, cy))
-            cy += 26
+
+        for si, (title_text, items) in enumerate(sections):
+            cx = col_x[si % 3]
+            cy = 65 + (si // 3) * 220
+
+            sec_title = self.font.render(title_text, True, COLOR_HIGHLIGHT)
+            self.screen.blit(sec_title, (cx, cy))
+            cy += 24
+
+            for key, desc in items:
+                key_surf = self.font_small.render(key, True, (180, 200, 255))
+                self.screen.blit(key_surf, (cx, cy))
+                desc_surf = self.font_small.render(desc, True, COLOR_TEXT)
+                self.screen.blit(desc_surf, (cx + key_surf.get_width() + 8, cy))
+                cy += 20
+
+        # 底部退出提示
+        hint = self.font_small.render("H 键关闭指南", True, COLOR_TEXT_DIM)
+        self.screen.blit(hint, (WIN_WIDTH // 2 - hint.get_width() // 2, WIN_HEIGHT - 30))
 
     def _quit(self):
         pygame.quit()
