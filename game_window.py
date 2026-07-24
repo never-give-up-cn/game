@@ -9,7 +9,15 @@ import pygame
 from map_grid import MapGrid, TileType
 from building import Building, BUILDING_TEMPLATES, register_building
 from building.apple_factory import AppleFactory
+from inserter import Inserter
+from conveyor import ConveyorBelt, UndergroundBelt, Splitter
 register_building("苹果工厂", AppleFactory)
+# 自动注册机械臂/传送带/分流器
+for _n in BUILDING_NAMES:
+    if "机械臂" in _n: register_building(_n, Inserter)
+    elif "地下传送带" in _n: register_building(_n, UndergroundBelt)
+    elif "传送带" in _n: register_building(_n, ConveyorBelt)
+    elif "分流器" in _n: register_building(_n, Splitter)
 from crafting import MANUAL_RECIPES, get_craftable_manual
 from backpack.ui import draw_backpack_ui
 from building.panel_ui import draw_building_interaction

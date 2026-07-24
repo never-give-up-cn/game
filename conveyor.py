@@ -1,110 +1,134 @@
-"""传送带系统 - 双车道物理引擎"""
+"""传送带系统 - 双车道物理引擎 (首尾直连 + 车道保留)"""
 
 from typing import Dict, List, Optional, Tuple
+
+# 运行时才导入 BuildingBase (避免循环引用)
 from building.base import BuildingBase
 
-
-# 传送带速度（单向件/秒, 双向件/秒）
+# 传送带速度 (每帧移动量)
 BELT_SPECS = {
-    1: {"speed": 7.5/60, "max_per_lane": 4},   # 黄带 7.5/s
-    2: {"speed": 15.0/60, "max_per_lane": 4},  # 红带 15/s
-    3: {"speed": 22.5/60, "max_per_lane": 4},  # 蓝带 22.5/s
-    4: {"speed": 30.0/60, "max_per_lane": 4},  # 涡轮 30/s
+    1: {"speed": 7.5/60, "capacity": 4},
+    2: {"speed": 15.0/60, "capacity": 4},
+    3: {"speed": 22.5/60, "capacity": 4},
+    4: {"speed": 30.0/60, "capacity": 4},
 }
 
-# 地下传送带最大跨越格数
 UG_DIST = {1: 4, 2: 6, 3: 8, 4: 10}
+DIR_VEC = [(0, -1), (1, 0), (0, 1), (-1, 0)]  # 0=up, 1=right, 2=down, 3=left
 
 
 class ConveyorBelt(BuildingBase):
-    """传送带 - 双车道物理系统"""
+    """传送带 - 首尾直连 + 双车道保留"""
 
     def __init__(self, x: int, y: int, template: dict):
         super().__init__(x, y, template)
         self.direction: int = 0
         self.tier: int = template.get("belt_tier", 1)
         spec = BELT_SPECS.get(self.tier, BELT_SPECS[1])
-        self.belt_speed: float = spec["speed"]     # 每帧移动量
-        self.max_per_lane: int = spec["max_per_lane"]
-        # 车道: {lane: [{"id": item_id, "pos": float, "progress": float}]}
+        self.belt_speed = spec["speed"]
+        self.capacity = spec["capacity"]
         self.lanes: Dict[str, List[dict]] = {"left": [], "right": []}
+        self.game_map: Optional["MapGrid"] = None
 
     def rotate(self):
         self.direction = (self.direction + 1) % 4
 
-    def _lane_items(self, lane: str) -> int:
-        """某车道物品数"""
-        return len(self.lanes.get(lane, []))
-
     @property
-    def total_items(self) -> int:
-        return self._lane_items("left") + self._lane_items("right")
-
-    def is_lane_full(self, lane: str) -> bool:
-        return self._lane_items(lane) >= self.max_per_lane
+    def front_pos(self) -> Tuple[int, int]:
+        """车头前方一格 (物品出口方向)"""
+        dx, dy = DIR_VEC[self.direction]
+        return self.x + dx, self.y + dy
 
     def add_item(self, item_id: str, lane: str = "left") -> bool:
-        """向指定车道添加物品，返回是否成功"""
+        """向指定车道添加物品 (从尾部pos=1.0进入)"""
         if lane not in self.lanes:
             lane = "left"
-        if self.is_lane_full(lane):
+        if len(self.lanes[lane]) >= self.capacity:
             return False
-        # 新物品从末尾(pos=1.0)进入，排队等待
-        self.lanes[lane].append({"id": item_id, "pos": 1.0, "progress": 0.0})
+        self.lanes[lane].append({"id": item_id, "pos": 1.0})
         return True
 
+    def _find_next_belt(self) -> Optional["ConveyorBelt"]:
+        """查找车头正前方相邻的传送带"""
+        fx, fy = self.front_pos
+        if not self.game_map:
+            return None
+        for b in self.game_map.buildings:
+            if b.x == fx and b.y == fy and isinstance(b, ConveyorBelt):
+                return b
+        return None
+
+    def _transfer_front_item(self, lane: str):
+        """尝试将某车道车头物品转移到下一格传送带对应车道"""
+        lane_items = self.lanes[lane]
+        if not lane_items:
+            return
+        front = lane_items[0]
+        if front["pos"] > 0.01:  # 还没到车头位置
+            return
+
+        next_belt = self._find_next_belt()
+        if not next_belt:
+            return  # 前方无传送带, 物品排队等待
+
+        # 车道映射: 直连 L→L, R→R
+        # 转弯: 内→内, 外→外 (需要根据方向计算)
+        target_lane = lane
+        my_dir = self.direction
+        next_dir = next_belt.direction
+
+        if my_dir == next_dir:
+            # 直连
+            target_lane = lane
+        elif (my_dir + 1) % 4 == next_dir:
+            # 右转弯: 左→内侧, 右→外侧 (内侧=left lane of next belt going right)
+            target_lane = "left" if lane == "left" else "right"
+        elif (my_dir - 1) % 4 == next_dir:
+            # 左转弯: 左→外侧, 右→内侧
+            target_lane = "right" if lane == "left" else "left"
+
+        if len(next_belt.lanes.get(target_lane, [])) >= next_belt.capacity:
+            return  # 下游车道满了
+
+        # 转移物品 (拷贝, 非引用)
+        item = {"id": front["id"], "pos": 1.0}
+        next_belt.lanes[target_lane].append(item)
+        lane_items.pop(0)
+
     def tick(self, inventory) -> dict:
-        """每帧推进物品，同车道阻塞隔离"""
+        """每帧推进: 从车头→车尾处理, 首尾直连传递"""
         for lane_name in ("left", "right"):
             lane = self.lanes[lane_name]
             if not lane:
                 continue
 
-            # 从前往后(高pos→低pos)推进
-            # 前方(高pos)物品决定后方(低pos)能否移动
-            for i in range(len(lane) - 1, -1, -1):
-                item = lane[i]
-                # 最前方的物品(pos最大)自由移动直到离开
-                if i == len(lane) - 1:
-                    item["pos"] -= self.belt_speed
-                    item["progress"] = 1.0 - item["pos"]
-                else:
-                    # 检查前方物品位置
-                    front = lane[i + 1]
-                    gap = front["pos"] - item["pos"]
-                    min_gap = 1.0 / self.max_per_lane  # 物品间最小间距
-                    if gap > min_gap + self.belt_speed:
-                        item["pos"] += self.belt_speed
-                    elif gap > min_gap:
-                        item["pos"] += gap - min_gap
-                    # 否则原地排队
-                    item["progress"] = 1.0 - item["pos"]
+            # 1. 车头物品尝试转移到下一格
+            self._transfer_front_item(lane_name)
 
-            # 移除离开传送带的物品(pos <= 0)
-            self.lanes[lane_name] = [it for it in lane if it["pos"] > 0]
+            # 2. 从车头→车尾推进 (已移除已转移的物品)
+            for item in lane:
+                item["pos"] -= self.belt_speed
+                if item["pos"] < 0.01:
+                    item["pos"] = 0.01  # 保留在车头等待
+
+            # 3. 移除 pos < 0 (理论上不会触发, 安全清理)
+            self.lanes[lane_name] = [it for it in lane if it["pos"] > -0.01]
 
         return {}
 
-    def can_accept(self, lane: str) -> bool:
-        """某车道是否可接收新物品（至少有一个空位）"""
-        return self._lane_items(lane) < self.max_per_lane
-
     def __repr__(self):
-        li = len(self.lanes["left"])
-        ri = len(self.lanes["right"])
-        return f"<Belt T{self.tier} ({li}/{ri}) dir={self.direction}>"
+        li = len(self.lanes["left"]); ri = len(self.lanes["right"])
+        return f"<Belt T{self.tier} dir={self.direction} ({li}/{ri})>"
 
 
 class UndergroundBelt(BuildingBase):
-    """地下传送带"""
-
-    def __init__(self, x: int, y: int, template: dict):
+    def __init__(self, x, y, template):
         super().__init__(x, y, template)
-        self.direction: int = 0
-        self.tier: int = template.get("belt_tier", 1)
-        self.max_dist: int = UG_DIST.get(self.tier, 4)
-        self.is_entry: bool = True
-        self.paired: bool = False
+        self.direction = 0
+        self.tier = template.get("belt_tier", 1)
+        self.max_dist = UG_DIST.get(self.tier, 4)
+        self.is_entry = True
+        self.paired = False
 
     def rotate(self):
         self.direction = (self.direction + 1) % 4
@@ -114,54 +138,48 @@ class UndergroundBelt(BuildingBase):
         C = self._popup_colors()
         pr = rect
         s = pygame.Surface((pr.w, pr.h), pygame.SRCALPHA)
-        s.fill(C["bg"])
-        screen.blit(s, pr)
-        pygame.draw.rect(screen, (60, 160, 200), pr, 2, border_radius=8)
-        title_bar = pygame.Rect(pr.x + 4, pr.y + 4, pr.w - 8, 28)
-        pygame.draw.rect(screen, C["title_bg"], title_bar, border_radius=4)
-        role = "入口 →" if self.is_entry else "← 出口"
-        screen.blit(font_small.render(f"Underground {role}", True, C["title_text"]), (pr.x + 14, pr.y + 8))
-        close_r = pygame.Rect(pr.right - 28, pr.top + 6, 20, 18)
-        cc = (255,80,80) if close_r.collidepoint(mx,my) else (120,130,150)
-        pygame.draw.rect(screen, cc, close_r, border_radius=3)
-        screen.blit(font_small.render("×", True, (255,255,255)), (close_r.x+5, close_r.y+1))
-        yy = pr.y+40; lx = pr.x+14
-        for line in [f"Tier {self.tier}  Max span: {self.max_dist} tiles",
-                     f"Connected: {'Yes' if self.paired else 'No'}",
-                     "Pair required | R to rotate"]:
-            screen.blit(font_small.render(line, True, C["text"]), (lx, yy)); yy += 18
+        s.fill(C["bg"]); screen.blit(s, pr)
+        pygame.draw.rect(screen, (60,160,200), pr, 2, border_radius=8)
+        tb = pygame.Rect(pr.x+4, pr.y+4, pr.w-8, 28)
+        pygame.draw.rect(screen, C["title_bg"], tb, border_radius=4)
+        role = "IN →" if self.is_entry else "← OUT"
+        screen.blit(font_small.render(f"Underground {role}  T{self.tier}", True, C["title_text"]), (pr.x+14, pr.y+8))
+        cr = pygame.Rect(pr.right-28, pr.top+6, 20, 18)
+        cc = (255,80,80) if cr.collidepoint(mx,my) else (120,130,150)
+        pygame.draw.rect(screen, cc, cr, border_radius=3)
+        screen.blit(font_small.render("×", True, (255,255,255)), (cr.x+5, cr.y+1))
+        y = pr.y+40; x = pr.x+14
+        for l in [f"Max span: {self.max_dist} tiles", f"Paired: {self.paired}", "R to rotate"]:
+            screen.blit(font_small.render(l, True, C["text"]), (x, y)); y += 18
+
+    def __repr__(self):
+        return f"<Underground T{self.tier} {'IN' if self.is_entry else 'OUT'}>"
 
 
 class Splitter(BuildingBase):
-    """分流器 - 均分/优先/过滤"""
-
-    def __init__(self, x: int, y: int, template: dict):
+    def __init__(self, x, y, template):
         super().__init__(x, y, template)
-        self.tier: int = template.get("belt_tier", 1)
-        self.priority: str = "none"
+        self.tier = template.get("belt_tier", 1)
+        self.priority = "none"
         self.filter_items: List[str] = []
         self.input_buf: Dict[str, List] = {"left": [], "right": []}
         self.output_buf: Dict[str, List] = {"left": [], "right": []}
-        self.toggle: int = 0  # 交替输出用
+        self.toggle = 0
 
     def tick(self, inventory) -> dict:
-        """分流器: 均分/优先/过滤"""
         for lane in ("left", "right"):
             if self.input_buf[lane]:
                 item = self.input_buf[lane].pop(0)
-                # 检查过滤
                 if self.filter_items and item["id"] not in self.filter_items:
-                    # 不匹配走另一输出
-                    out_lane = "right" if lane == "left" else "left"
+                    out = "right" if lane == "left" else "left"
                 elif self.priority == "left":
-                    out_lane = "left"
+                    out = "left"
                 elif self.priority == "right":
-                    out_lane = "right"
+                    out = "right"
                 else:
-                    # 均分: 交替输出
-                    out_lane = "left" if self.toggle % 2 == 0 else "right"
+                    out = "left" if self.toggle % 2 == 0 else "right"
                     self.toggle += 1
-                self.output_buf[out_lane].append(item)
+                self.output_buf[out].append(item)
         return {}
 
     def render_popup(self, screen, rect, mx, my, inventory, tech_unlocked, font_small, anim_frame):
@@ -171,19 +189,15 @@ class Splitter(BuildingBase):
         s = pygame.Surface((pr.w, pr.h), pygame.SRCALPHA)
         s.fill(C["bg"]); screen.blit(s, pr)
         pygame.draw.rect(screen, (60,200,160), pr, 2, border_radius=8)
-        title_bar = pygame.Rect(pr.x+4, pr.y+4, pr.w-8, 28)
-        pygame.draw.rect(screen, C["title_bg"], title_bar, border_radius=4)
+        tb = pygame.Rect(pr.x+4, pr.y+4, pr.w-8, 28)
+        pygame.draw.rect(screen, C["title_bg"], tb, border_radius=4)
         screen.blit(font_small.render(f"Splitter T{self.tier}", True, C["title_text"]), (pr.x+14, pr.y+8))
-        close_r = pygame.Rect(pr.right-28, pr.top+6, 20,18)
-        cc = (255,80,80) if close_r.collidepoint(mx,my) else (120,130,150)
-        pygame.draw.rect(screen, cc, close_r, border_radius=3)
-        screen.blit(font_small.render("×", True, (255,255,255)), (close_r.x+5, close_r.y+1))
-        yy = pr.y+40; lx = pr.x+14
+        cr = pygame.Rect(pr.right-28, pr.top+6, 20, 18)
+        cc = (255,80,80) if cr.collidepoint(mx,my) else (120,130,150)
+        pygame.draw.rect(screen, cc, cr, border_radius=3)
+        screen.blit(font_small.render("×", True, (255,255,255)), (cr.x+5, cr.y+1))
+        y = pr.y+40; x = pr.x+14
         pri = {"none":"Off","left":"Left","right":"Right"}
-        lines = [
-            f"Priority: {pri.get(self.priority,'Off')}",
-            f"Filter: {','.join(self.filter_items) if self.filter_items else 'None'}",
-            f"Lane: L→L  R→R  |  R to toggle priority",
-        ]
-        for line in lines:
-            screen.blit(font_small.render(line, True, C["text"]), (lx, yy)); yy += 18
+        flt = ",".join(self.filter_items) if self.filter_items else "None"
+        for l in [f"Priority: {pri[self.priority]}", f"Filter: {flt}", "Lane: L→L R→R"]:
+            screen.blit(font_small.render(l, True, C["text"]), (x, y)); y += 18
