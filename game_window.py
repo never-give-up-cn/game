@@ -8,6 +8,7 @@ import pygame
 from map_grid import MapGrid, TileType
 from building import Building, BUILDING_TEMPLATES
 from crafting import MANUAL_RECIPES, get_craftable_manual
+from tech_tree import TECH_NODES, get_available, max_plugin_tier, get_building_bonuses
 from player import Player
 
 
@@ -119,7 +120,11 @@ class GameWindow:
         self._msg("WASD 移动 | 左键放置 | 右键拆除 | H 帮助")
 
         self.show_help = False
-        self.show_backpack = False  # E 键背包界面
+        self.show_backpack = False   # E 键背包界面
+        self.show_building_panel = False  # 建筑面板
+        self.show_tech_tree = False       # 科技树
+        self.panel_building = None        # 当前打开的建筑
+        self.tech_unlocked: set = set()   # 已解锁科技 ID 集合
 
         # 拆除状态（长按展示进度条）
         self.demolish_target = None  # 正在拆除的建筑
@@ -192,10 +197,15 @@ class GameWindow:
             self.show_help = not self.show_help
         elif key == pygame.K_e:
             self.show_backpack = not self.show_backpack
+            self.show_building_panel = False
+        elif key == pygame.K_t:
+            self.show_tech_tree = not self.show_tech_tree
         elif key == pygame.K_ESCAPE:
             self.placing = False
             self.show_help = False
             self.show_backpack = False
+            self.show_building_panel = False
+            self.show_tech_tree = False
         elif key == pygame.K_b:
             if not self.placing:
                 self.placing = True
@@ -269,8 +279,16 @@ class GameWindow:
         return -1
 
     def _on_left_click(self, pos: Tuple[int, int]):
-        """鼠标左键：选中背包 / 放置建筑 / 合成"""
-        # 背包界面打开时：点击合成
+        """鼠标左键：选中背包 / 放置建筑 / 合成 / 打开建筑面板 / 科技树"""
+        # 建筑面板：插件/科技树按钮
+        if self.show_building_panel:
+            self._click_building_panel(pos)
+            return
+        # 科技树：解锁节点
+        if self.show_tech_tree:
+            self._click_tech_tree(pos)
+            return
+        # 背包界面：合成
         if self.show_backpack:
             for rect, recipe in getattr(self, '_craft_buttons', []):
                 if rect.collidepoint(pos):
@@ -282,7 +300,7 @@ class GameWindow:
                     return
             return
 
-        # 先检测是否点击在背包栏
+        # 点击背包栏选中物品
         slot = self._get_clicked_slot(pos)
         if slot >= 0:
             inv = self.player.inventory
@@ -290,12 +308,21 @@ class GameWindow:
                 inv.selected = slot
                 return
 
-        # 再检测是否点击在地图格子上
+        # 点击地图
         mx, my = pos
         if 0 <= mx < MAP_COLS * TILE_SIZE and 0 <= my < MAP_HEIGHT:
             gx = mx // TILE_SIZE
             gy = my // TILE_SIZE
-            self._place_with_selected(gx, gy)
+            # 有选中的建造材料 → 放置建筑
+            sel = self.player.selected_slot
+            if sel and sel.item_id in ITEM_TO_BUILDING:
+                self._place_with_selected(gx, gy)
+            else:
+                # 无建造材料 → 打开建筑面板
+                bld = self._building_at(gx, gy)
+                if bld:
+                    self.panel_building = bld
+                    self.show_building_panel = True
 
     def _building_at(self, gx: int, gy: int):
         """返回 (gx,gy) 处的建筑，没有则返回 None"""
@@ -313,6 +340,29 @@ class GameWindow:
             if bld:
                 self.demolish_target = bld
                 self.demolish_frames = 0
+
+    def _click_building_panel(self, pos):
+        """建筑面板点击 - 打开科技树"""
+        mx, my = pos
+        if self.panel_building:
+            # 底部按钮区域
+            if WIN_HEIGHT - 60 <= my <= WIN_HEIGHT - 20:
+                self.show_building_panel = False
+                self.show_tech_tree = True
+
+    def _click_tech_tree(self, pos):
+        """科技树点击 - 解锁节点"""
+        mx, my = pos
+        for rect, node in getattr(self, '_tech_buttons', []):
+            if rect.collidepoint(pos):
+                inv = self.player.inventory
+                if node.can_unlock(inv, self.tech_unlocked):
+                    node.unlock(inv)
+                    self.tech_unlocked.add(node.node_id)
+                    self._msg(f"解锁: {node.name}")
+                else:
+                    self._msg(f"材料不足或前置未解锁")
+                return
 
     def _cancel_demolish(self):
         """取消拆除（松开右键或移开鼠标）"""
@@ -382,7 +432,7 @@ class GameWindow:
     def _update_movement(self):
         """每帧根据持续按住的键移动（支持斜向）"""
         self._tick_demolish()
-        if self.placing or self.show_help or self.show_backpack:
+        if self.placing or self.show_help or self.show_backpack or self.show_building_panel or self.show_tech_tree:
             return
 
         dx, dy = 0, 0
@@ -789,6 +839,174 @@ class GameWindow:
         hint = self.font_small.render("ESC 关闭  |  点击合成配方制作物品", True, COLOR_TEXT_DIM)
         self.screen.blit(hint, (panel_pad, WIN_HEIGHT - 30))
 
+    # ========== 建筑面板 ==========
+
+    def _draw_building_panel(self):
+        if not self.show_building_panel or not self.panel_building:
+            return
+        b = self.panel_building
+        inv = self.player.inventory
+
+        overlay = pygame.Surface((WIN_WIDTH, WIN_HEIGHT), pygame.SRCALPHA)
+        overlay.fill((10, 10, 15, 230))
+        self.screen.blit(overlay, (0, 0))
+
+        cx = WIN_WIDTH // 2
+        y = 60
+
+        title = self.font_large.render(f"{b.name}  ({b.x},{b.y})", True, COLOR_HIGHLIGHT)
+        self.screen.blit(title, (cx - title.get_width() // 2, y))
+        y += 35
+
+        ptier = max_plugin_tier(self.tech_unlocked)
+        bonuses = get_building_bonuses(self.tech_unlocked)
+        info = (f"HP: {b.hp}/{b.max_hp}  "
+                f"效率: {1+bonuses['efficiency']:.1f}  "
+                f"速度: {1+bonuses['speed']:.1f}  "
+                f"插件: {len(b.plugins)}/{min(b.plugin_slots, ptier)}")
+        line = self.font.render(info, True, COLOR_TEXT_DIM)
+        self.screen.blit(line, (cx - line.get_width() // 2, y))
+        y += 30
+
+        from item import ITEM_TEMPLATES as _it
+
+        # 左: 输入
+        lx = cx - 200
+        self.screen.blit(self.font.render("输入", True, COLOR_HIGHLIGHT), (lx, y))
+        y2 = y + 25
+        if b.inputs:
+            for iid, amt in b.inputs.items():
+                t = _it.get(iid)
+                n = t.name if t else iid
+                hv = inv.count(iid)
+                self.screen.blit(self.font.render(f"  {n} x{amt}  (有{hv})", True, COLOR_TEXT), (lx, y2))
+                y2 += 22
+        else:
+            self.screen.blit(self.font.render("  (无)", True, COLOR_TEXT_DIM), (lx, y2))
+
+        # 右: 输出
+        rx = cx + 20
+        self.screen.blit(self.font.render("输出", True, COLOR_HIGHLIGHT), (rx, y))
+        y2 = y + 25
+        if b.outputs:
+            for iid, amt in b.outputs.items():
+                t = _it.get(iid)
+                n = t.name if t else iid
+                a = max(1, int(amt * (1+bonuses['efficiency']) * (1+bonuses['speed'])))
+                self.screen.blit(self.font.render(f"  {n} x{a}", True, COLOR_TEXT), (rx, y2))
+                y2 += 22
+        else:
+            self.screen.blit(self.font.render("  (无)", True, COLOR_TEXT_DIM), (rx, y2))
+
+        y += max(len(b.inputs or []), len(b.outputs or []), 1) * 24 + 10
+
+        # 进度条
+        if b.inputs and b.outputs:
+            bw, bh = 300, 12
+            bx = cx - bw // 2
+            pr = b.production_progress
+            pygame.draw.rect(self.screen, (40,40,50), (bx, y, bw, bh))
+            if pr > 0:
+                pygame.draw.rect(self.screen, (80,180,255), (bx, y, int(bw*pr), bh))
+            pygame.draw.rect(self.screen, (100,100,120), (bx, y, bw, bh), 1)
+            pct = self.font_small.render(f"{int(pr*100)}%", True, COLOR_TEXT)
+            self.screen.blit(pct, (cx - pct.get_width()//2, y+bh+4))
+            y += bh + 25
+        else:
+            self.screen.blit(self.font_small.render("(无需生产)", True, COLOR_TEXT_DIM), (cx-50, y))
+            y += 25
+
+        # 插件槽
+        plug = self.font.render(f"插件槽  (科技{ptier}级)", True, COLOR_HIGHLIGHT)
+        self.screen.blit(plug, (cx - plug.get_width()//2, y))
+        y += 25
+        ms = min(b.plugin_slots, ptier)
+        ss, sg = 36, 8
+        tw = ms * (ss + sg) - sg
+        sx0 = cx - tw // 2
+        for i in range(ms):
+            sx = sx0 + i * (ss + sg)
+            if i < len(b.plugins):
+                pygame.draw.rect(self.screen, (60,120,60), (sx, y, ss, ss))
+                pygame.draw.rect(self.screen, (100,200,100), (sx, y, ss, ss), 1)
+                self.screen.blit(self.font_small.render("P", True, COLOR_HIGHLIGHT), (sx+10, y+8))
+            else:
+                pygame.draw.rect(self.screen, (40,40,50), (sx, y, ss, ss))
+                pygame.draw.rect(self.screen, COLOR_HOTBAR_BORDER, (sx, y, ss, ss), 1)
+                self.screen.blit(self.font_small.render("+", True, COLOR_TEXT_DIM), (sx+12, y+8))
+
+        self.screen.blit(self.font.render("T 科技树", True, COLOR_HIGHLIGHT), (20, WIN_HEIGHT-45))
+        self.screen.blit(self.font_small.render("ESC 关闭", True, COLOR_TEXT_DIM), (WIN_WIDTH-120, WIN_HEIGHT-45))
+
+    # ========== 科技树 ==========
+
+    def _draw_tech_tree(self):
+        if not self.show_tech_tree:
+            return
+        inv = self.player.inventory
+        overlay = pygame.Surface((WIN_WIDTH, WIN_HEIGHT), pygame.SRCALPHA)
+        overlay.fill((10, 10, 15, 240))
+        self.screen.blit(overlay, (0, 0))
+
+        t = self.font_large.render("科 技 树", True, COLOR_HIGHLIGHT)
+        self.screen.blit(t, (WIN_WIDTH//2 - t.get_width()//2, 30))
+
+        self._tech_buttons = []
+        y = 80
+        mx, my = pygame.mouse.get_pos()
+
+        for tier in range(1, 5):
+            nodes = [n for n in TECH_NODES.values() if n.tier == tier]
+            if not nodes:
+                continue
+            tl = self.font.render(f"── Tier {tier} ──", True, COLOR_TEXT_DIM)
+            self.screen.blit(tl, (60, y))
+            y += 28
+
+            for node in nodes:
+                unlocked = node.node_id in self.tech_unlocked
+                can = node.can_unlock(inv, self.tech_unlocked)
+                parents = all(p in self.tech_unlocked for p in node.parent_ids)
+
+                rh = 50
+                rr = pygame.Rect(60, y, WIN_WIDTH - 120, rh)
+                hover = rr.collidepoint(mx, my)
+
+                if unlocked:
+                    bg = (30, 60, 30)
+                elif can:
+                    bg = (50, 60, 40) if hover else (35, 45, 30)
+                elif parents:
+                    bg = (40, 30, 30) if hover else (30, 25, 25)
+                else:
+                    bg = (25, 25, 30)
+
+                pygame.draw.rect(self.screen, bg, rr)
+                pygame.draw.rect(self.screen, COLOR_HOTBAR_BORDER, rr, 1)
+
+                st = "✓" if unlocked else ("▶ 解锁" if can else "🔒")
+                sc = COLOR_HIGHLIGHT if unlocked else ((100,255,100) if can else COLOR_TEXT_DIM)
+                self.screen.blit(self.font.render(f"{st}  {node.name}", True, sc), (rr.x+8, rr.y+4))
+                self.screen.blit(self.font_small.render(node.description, True, COLOR_TEXT_DIM), (rr.x+8, rr.y+26))
+
+                if not unlocked:
+                    xo = rr.right - 8
+                    for mid, amt in node.requirements.items():
+                        from item import ITEM_TEMPLATES as _it2
+                        tmpl = _it2.get(mid)
+                        mn = tmpl.name if tmpl else mid
+                        hv = inv.count(mid)
+                        c = COLOR_TEXT if hv >= amt else (255,80,80)
+                        m = self.font_small.render(f"{mn} {hv}/{amt}", True, c)
+                        xo -= m.get_width() + 6
+                        self.screen.blit(m, (xo, rr.y+6))
+
+                if can:
+                    self._tech_buttons.append((rr, node))
+                y += rh + 4
+
+        self.screen.blit(self.font_small.render("点击绿色节点解锁  |  ESC 关闭", True, COLOR_TEXT_DIM), (60, WIN_HEIGHT-30))
+
     def _draw_help(self):
         if not self.show_help:
             return
@@ -807,6 +1025,8 @@ class GameWindow:
             "S + A         左下 (斜向)",
             "S + D         右下 (斜向)", "",
             "E             打开背包 / 合成界面",
+            "T             科技树",
+            "左键建筑      打开建筑面板",
             "1 ~ 8         选择背包物品",
             "左键背包格    选中物品",
             "左键地图      放置建筑（需选中建造材料）",
@@ -848,6 +1068,8 @@ class GameWindow:
             self._draw_mouse_ghost()
             self._draw_demolish_bar()
             self._draw_messages()
+            self._draw_building_panel()
+            self._draw_tech_tree()
             self._draw_backpack_ui()
             self._draw_help()
             pygame.display.flip()

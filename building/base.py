@@ -147,11 +147,11 @@ class BuildingBase:
 
     # ──────────── 插件 ────────────
 
-    def has_plugin_slot(self) -> bool:
-        return len(self.plugins) < self.plugin_slots
+    def has_plugin_slot(self, max_tech_tier: int = 99) -> bool:
+        return len(self.plugins) < min(self.plugin_slots, max_tech_tier)
 
-    def add_plugin(self, plugin_id: str) -> bool:
-        if self.has_plugin_slot():
+    def add_plugin(self, plugin_id: str, max_tech_tier: int = 99) -> bool:
+        if self.has_plugin_slot(max_tech_tier):
             self.plugins.append(plugin_id)
             return True
         return False
