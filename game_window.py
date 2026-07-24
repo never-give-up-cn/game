@@ -213,9 +213,7 @@ class GameWindow:
                     self.right_held = True
                     self._on_right_down(event.pos)
             elif event.type == pygame.MOUSEBUTTONUP:
-                if event.button == 1:     # 左键松开 -> 停止拖拽
-                    self.popup_dragging = False
-                elif event.button == 3:   # 右键松开 -> 取消拆除
+                if event.button == 3:   # 右键松开 -> 取消拆除
                     self.right_held = False
                     self._cancel_demolish()
 
@@ -277,11 +275,10 @@ class GameWindow:
             gy = my // TILE_SIZE
             self.mouse_grid_pos = (gx, gy)
             self.mouse_in_map = True
-            # 悬浮在建筑上 -> 侧栏显示信息（弹窗打开时不覆盖）
-            if not self.popup_building:
-                bld = self._building_at(gx, gy)
-                if bld:
-                    self.selected_building = bld
+            # 悬浮在建筑上 -> 侧栏显示信息
+            bld = self._building_at(gx, gy)
+            if bld:
+                self.selected_building = bld
         else:
             self.mouse_in_map = False
         # 背包格子
@@ -351,7 +348,6 @@ class GameWindow:
             # 先检查是否点击到建筑 → 弹窗
             bld = self._building_at(gx, gy)
             if bld:
-                self.popup_building = None
                 self.panel_building = bld
                 self.selected_building = bld
                 self.show_building_panel = True
