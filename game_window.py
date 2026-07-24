@@ -513,10 +513,8 @@ class GameWindow:
             self._msg(f"Z↓ {self.cursor_item} 到地面")
 
     def _pickup_to_cursor(self):
-        """F: 拾取附近物品到光标"""
-        if not self.mouse_in_map:
-            return
-        gx, gy = self.mouse_grid_pos
+        """F: 拾取脚下物品（玩家所在格）"""
+        gx, gy = self.player.x, self.player.y
         bld = self._building_at(gx, gy)
         if bld and hasattr(bld, 'lanes'):
             for ln in ("left", "right"):
