@@ -635,19 +635,20 @@ class GameWindow:
             self._msg(f"失败: {e}")
 
     def _tick_buildings(self):
-        """按顺序 tick: 分流器 → 传送带 → 机械臂 → 工厂"""
+        """一次遍历分类, 按序 tick: 分流器→传送带→机械臂→其他"""
         inv = self.player.inventory
         from conveyor import Splitter, ConveyorBelt
         from inserter import Inserter
+        splitters, belts, inserters, others = [], [], [], []
         for b in self.game_map.buildings:
-            if isinstance(b, Splitter): b.tick(inv)
-        for b in self.game_map.buildings:
-            if isinstance(b, ConveyorBelt): b.tick(inv)
-        for b in self.game_map.buildings:
-            if isinstance(b, Inserter): b.tick(inv)
-        for b in self.game_map.buildings:
-            if not isinstance(b, (Splitter, ConveyorBelt, Inserter)):
-                b.tick(inv)
+            if isinstance(b, Splitter): splitters.append(b)
+            elif isinstance(b, ConveyorBelt): belts.append(b)
+            elif isinstance(b, Inserter): inserters.append(b)
+            else: others.append(b)
+        for b in splitters: b.tick(inv)
+        for b in belts: b.tick(inv)
+        for b in inserters: b.tick(inv)
+        for b in others: b.tick(inv)
 
     def _tick_research(self):
         """每帧推进研究进度"""
@@ -919,7 +920,7 @@ class GameWindow:
         glow_r = TILE_SIZE
         for i in range(4):
             sr = glow_r + i * 6
-            alpha = int(35 * pulse) - i * 6
+            alpha = int(35 * pulse) - i * 6WW
             if alpha <= 0:
                 continue
             s = pygame.Surface((sr * 2, sr * 2), pygame.SRCALPHA)
