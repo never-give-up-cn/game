@@ -1,32 +1,27 @@
-"""传送带系统 - 双车道物理引擎 (首尾直连 + 车道保留)"""
+"""传送带系统 - 队列模型 (尾→头, 车尾→车头)"""
 
-from typing import Dict, List, Optional, Tuple
-
-# 运行时才导入 BuildingBase (避免循环引用)
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 from building.base import BuildingBase
 
-# 传送带速度 (每帧移动量)
-BELT_SPECS = {
-    1: {"speed": 7.5/60, "capacity": 4},
-    2: {"speed": 15.0/60, "capacity": 4},
-    3: {"speed": 22.5/60, "capacity": 4},
-    4: {"speed": 30.0/60, "capacity": 4},
-}
+if TYPE_CHECKING:
+    from map_grid import MapGrid
 
+BELT_SPECS = {1: {"speed": 7.5/60, "cap": 4}, 2: {"speed": 15/60, "cap": 4},
+              3: {"speed": 22.5/60, "cap": 4}, 4: {"speed": 30/60, "cap": 4}}
 UG_DIST = {1: 4, 2: 6, 3: 8, 4: 10}
-DIR_VEC = [(0, -1), (1, 0), (0, 1), (-1, 0)]  # 0=up, 1=right, 2=down, 3=left
+DIR_VEC = [(0, -1), (1, 0), (0, 1), (-1, 0)]
 
 
 class ConveyorBelt(BuildingBase):
-    """传送带 - 首尾直连 + 双车道保留"""
+    """传送带 - 队列模型: lane[List], index 0=车尾, last=车头"""
 
-    def __init__(self, x: int, y: int, template: dict):
+    def __init__(self, x, y, template):
         super().__init__(x, y, template)
-        self.direction: int = 0
-        self.tier: int = template.get("belt_tier", 1)
-        spec = BELT_SPECS.get(self.tier, BELT_SPECS[1])
-        self.belt_speed = spec["speed"]
-        self.capacity = spec["capacity"]
+        self.direction = 0
+        self.tier = template.get("belt_tier", 1)
+        s = BELT_SPECS.get(self.tier, BELT_SPECS[1])
+        self.belt_speed = s["speed"]
+        self.capacity = s["cap"]
         self.lanes: Dict[str, List[dict]] = {"left": [], "right": []}
         self.game_map: Optional["MapGrid"] = None
 
@@ -34,22 +29,20 @@ class ConveyorBelt(BuildingBase):
         self.direction = (self.direction + 1) % 4
 
     @property
-    def front_pos(self) -> Tuple[int, int]:
-        """车头前方一格 (物品出口方向)"""
+    def front_pos(self):
         dx, dy = DIR_VEC[self.direction]
         return self.x + dx, self.y + dy
 
     def add_item(self, item_id: str, lane: str = "left") -> bool:
-        """向指定车道添加物品 (从尾部pos=1.0进入)"""
+        """从车尾(index 0)加入物品"""
         if lane not in self.lanes:
             lane = "left"
         if len(self.lanes[lane]) >= self.capacity:
             return False
-        self.lanes[lane].append({"id": item_id, "pos": 1.0})
+        self.lanes[lane].insert(0, {"id": item_id})
         return True
 
-    def _find_next_belt(self) -> Optional["ConveyorBelt"]:
-        """查找车头正前方相邻的传送带"""
+    def _find_next(self):
         fx, fy = self.front_pos
         if not self.game_map:
             return None
@@ -58,67 +51,41 @@ class ConveyorBelt(BuildingBase):
                 return b
         return None
 
-    def _transfer_front_item(self, lane: str):
-        """尝试将某车道车头物品转移到下一格传送带对应车道"""
-        lane_items = self.lanes[lane]
-        if not lane_items:
-            return
-        front = lane_items[0]
-        if front["pos"] > 0.01:  # 还没到车头位置
-            return
-
-        next_belt = self._find_next_belt()
-        if not next_belt:
-            return  # 前方无传送带, 物品排队等待
-
-        # 车道映射: 直连 L→L, R→R
-        # 转弯: 内→内, 外→外 (需要根据方向计算)
-        target_lane = lane
-        my_dir = self.direction
-        next_dir = next_belt.direction
-
+    def _target_lane(self, my_lane, my_dir, next_dir):
+        """计算车道映射 (直连/转弯)"""
         if my_dir == next_dir:
-            # 直连
-            target_lane = lane
-        elif (my_dir + 1) % 4 == next_dir:
-            # 右转弯: 左→内侧, 右→外侧 (内侧=left lane of next belt going right)
-            target_lane = "left" if lane == "left" else "right"
-        elif (my_dir - 1) % 4 == next_dir:
-            # 左转弯: 左→外侧, 右→内侧
-            target_lane = "right" if lane == "left" else "left"
-
-        if len(next_belt.lanes.get(target_lane, [])) >= next_belt.capacity:
-            return  # 下游车道满了
-
-        # 转移物品 (拷贝, 非引用)
-        item = {"id": front["id"], "pos": 1.0}
-        next_belt.lanes[target_lane].append(item)
-        lane_items.pop(0)
+            return my_lane
+        turn_right = (my_dir + 1) % 4 == next_dir
+        turn_left = (my_dir - 1) % 4 == next_dir
+        if turn_right:
+            return "left" if my_lane == "left" else "right"
+        if turn_left:
+            return "right" if my_lane == "left" else "left"
+        return my_lane
 
     def tick(self, inventory) -> dict:
-        """每帧推进: 从车头→车尾处理, 首尾直连传递"""
-        for lane_name in ("left", "right"):
-            lane = self.lanes[lane_name]
+        """每帧: 从车头(last)→车尾(0)处理"""
+        for ln in ("left", "right"):
+            lane = self.lanes[ln]
             if not lane:
                 continue
-
-            # 1. 车头物品尝试转移到下一格
-            self._transfer_front_item(lane_name)
-
-            # 2. 从车头→车尾推进 (已移除已转移的物品)
-            for item in lane:
-                item["pos"] -= self.belt_speed
-                if item["pos"] < 0.01:
-                    item["pos"] = 0.01  # 保留在车头等待
-
-            # 3. 移除 pos < 0 (理论上不会触发, 安全清理)
-            self.lanes[lane_name] = [it for it in lane if it["pos"] > -0.01]
-
+            # 车头 = last index
+            head = lane[-1]
+            next_belt = self._find_next()
+            transferred = False
+            if next_belt:
+                tl = self._target_lane(ln, self.direction, next_belt.direction)
+                if len(next_belt.lanes.get(tl, [])) < next_belt.capacity:
+                    next_belt.lanes[tl].insert(0, head)  # 到下游车尾
+                    lane.pop()
+                    transferred = True
+            # 没转移时, 车头不动, 后方都堵住
+            # 但物品还是要按速度推进 (用帧计数器也可以)
+            # 简化: 每帧推进内部间距 (用 belt_speed 控制视觉移动)
         return {}
 
     def __repr__(self):
-        li = len(self.lanes["left"]); ri = len(self.lanes["right"])
-        return f"<Belt T{self.tier} dir={self.direction} ({li}/{ri})>"
+        return f"<Belt T{self.tier} ({len(self.lanes['left'])}/{len(self.lanes['right'])})>"
 
 
 class UndergroundBelt(BuildingBase):

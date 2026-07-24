@@ -877,17 +877,21 @@ class GameWindow:
                 ty = end_y - int(tip_size * m2.cos(m2.radians(a)))
                 pygame.draw.line(self.screen, arrow_c, (end_x, end_y), (tx, ty), 2)
 
-        # 传送带物品渲染（双车道，物品缩小到 1/3 宽度）
+        # 传送带物品渲染 (队列模型: index 0=车尾, last=车头)
         if bld and hasattr(bld, 'lanes'):
             from item import ITEM_TEMPLATES as _belt_it
             dir_angle = bld.direction * 90
             rad = math.radians(dir_angle)
             cx2 = rect.centerx
             cy2 = rect.centery
+            cap = getattr(bld, 'capacity', 4)
             for lane_name, off in [("left", -6), ("right", 6)]:
                 lane = bld.lanes.get(lane_name, [])
-                for item in lane:
-                    progress = 1.0 - item["pos"]
+                n = len(lane)
+                for idx, item in enumerate(lane):
+                    # 位置: 0(cap中的最后一格) → 1(车头)
+                    # idx 0=车尾, n-1=车头
+                    progress = (idx + 1) / (cap + 1)  # 1/5, 2/5, 3/5, 4/5
                     px = cx2 + int((progress - 0.5) * 16 * math.sin(rad))
                     py = cy2 - int((progress - 0.5) * 16 * math.cos(rad))
                     lx = px + int(off * math.cos(rad))
