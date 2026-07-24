@@ -15,6 +15,7 @@ from backpack.ui import draw_backpack_ui
 from building.panel_ui import draw_building_interaction
 from tech_tree import TECH_NODES, get_available, max_plugin_tier, get_building_bonuses, ResearchQueue
 from player import Player
+from item import ItemStack
 
 
 # ========== 常量 ==========
@@ -408,11 +409,31 @@ class GameWindow:
                     return
             return  # 背包打开时屏蔽其他点击
 
-        # 点击背包栏选中物品
+        # 点击背包栏 -> 光标交互（拿起/放下）
         slot = self._get_clicked_slot(pos)
         if slot >= 0:
             inv = self.player.inventory
-            if slot < len(inv.slots) and inv.slots[slot] is not None:
+            if slot < len(inv.slots):
+                stack = inv.slots[slot]
+                if self.cursor_item and self.cursor_count > 0:
+                    if stack and stack.item_id == self.cursor_item:
+                        can = stack.item.max_stack - stack.quantity
+                        add = min(can, self.cursor_count)
+                        stack.add(add); self.cursor_count -= add
+                        if self.cursor_count <= 0: self.cursor_item = None
+                    elif stack is None:
+                        n = ItemStack(self.cursor_item, 0)
+                        n.add(self.cursor_count)
+                        inv.slots[slot] = n
+                        self.cursor_item = None; self.cursor_count = 0
+                    else:
+                        old_id, old_q = stack.item_id, stack.quantity
+                        inv.slots[slot] = ItemStack(self.cursor_item, self.cursor_count)
+                        self.cursor_item = old_id; self.cursor_count = old_q
+                elif stack:
+                    self.cursor_item = stack.item_id
+                    self.cursor_count = stack.quantity
+                    inv.slots[slot] = None
                 inv.selected = slot
                 return
 
