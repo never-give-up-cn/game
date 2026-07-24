@@ -645,8 +645,8 @@ class GameWindow:
             elif isinstance(b, ConveyorBelt): belts.append(b)
             elif isinstance(b, Inserter): inserters.append(b)
             else: others.append(b)
-        for b in splitters: b.tick(inv)
-        for b in belts: b.tick(inv)
+        for b in belts: b.tick(inv)         # 1. 传送带先跑
+        for b in splitters: b.tick(inv)     # 2. 分流器再处理
         for b in inserters: b.tick(inv)
         for b in others: b.tick(inv)
 
