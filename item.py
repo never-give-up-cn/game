@@ -104,6 +104,10 @@ ITEM_TEMPLATES: Dict[str, Item] = {
     "lithium_brine":Item("lithium_brine","锂卤水", "Li", "fluid_raw","卤水矿"),
     "ammonia":      Item("ammonia",      "氨水溶液","A", "fluid_raw","氨冰"),
     "fluoride":     Item("fluoride",     "氟化物", "F",  "fluid_raw","氟矿"),
+
+    # ═══════ 建筑道具（可手持放置） ═══════
+    "belt_item":  Item("belt_item",  "传送带",  "=", "building", "基础物流，15件/秒"),
+    "inserter_item": Item("inserter_item", "机械臂", ")", "building", "基础电力机械臂"),
 }
 
 

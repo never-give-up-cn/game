@@ -78,6 +78,8 @@ ITEM_TO_BUILDING = {
     "coal": "仓库",
     # 机械臂
     "iron": "电力机械臂",
+    "belt_item": "基础传送带",
+    "inserter_item": "电力机械臂",
 }
 
 # 机械臂类名列表（用于方向箭头渲染）
@@ -115,6 +117,9 @@ class GameWindow:
         inv.add_item("apple", 2)
         inv.add_item("key", 1)
         inv.add_item("gold", 50)
+        # 初始建筑物资
+        inv.add_item("belt_item", 5)      # 5 条传送带
+        inv.add_item("inserter_item", 2)  # 2 个机械臂
         # 演示物流需求
         logi = self.player.logistics
         logi.set_request("wood", 10)
