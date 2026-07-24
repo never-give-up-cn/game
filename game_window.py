@@ -136,8 +136,12 @@ class GameWindow:
         # 侧栏折叠
         self.sidebar_collapsed = False
 
-        # 选中建筑 + 动画帧
+        # 选中建筑 + 弹窗 + 动画帧
         self.selected_building = None
+        self.popup_building = None
+        self.popup_rect = pygame.Rect(WIN_WIDTH//2-180, 80, 360, 280)
+        self.popup_dragging = False
+        self.popup_drag_off = (0, 0)
         self.anim_frame = 0
 
         # 鼠标状态
@@ -202,7 +206,9 @@ class GameWindow:
                     self.right_held = True
                     self._on_right_down(event.pos)
             elif event.type == pygame.MOUSEBUTTONUP:
-                if event.button == 3:     # 右键松开 -> 取消拆除
+                if event.button == 1:     # 左键松开 -> 停止拖拽
+                    self.popup_dragging = False
+                elif event.button == 3:   # 右键松开 -> 取消拆除
                     self.right_held = False
                     self._cancel_demolish()
 
@@ -212,6 +218,7 @@ class GameWindow:
             self.player.inventory.selected = -1
             self.placing = False
             self.selected_building = None
+            self.popup_building = None
         elif key == pygame.K_ESCAPE:
             self._quit()
         elif key == pygame.K_h:
@@ -257,12 +264,22 @@ class GameWindow:
     def _on_mouse_move(self, pos: Tuple[int, int]):
         """更新鼠标所在的格子坐标和悬浮索引"""
         mx, my = pos
-        # 地图格子
+        # 弹窗拖拽
+        if self.popup_dragging:
+            self.popup_rect.x = mx - self.popup_drag_off[0]
+            self.popup_rect.y = my - self.popup_drag_off[1]
+            return
+        # 地图格子 + 建筑悬浮检测
         if 0 <= mx < MAP_COLS * TILE_SIZE and 0 <= my < MAP_HEIGHT:
             gx = mx // TILE_SIZE
             gy = my // TILE_SIZE
             self.mouse_grid_pos = (gx, gy)
             self.mouse_in_map = True
+            # 悬浮在建筑上 -> 侧栏显示信息（弹窗打开时不覆盖）
+            if not self.popup_building:
+                bld = self._building_at(gx, gy)
+                if bld:
+                    self.selected_building = bld
         else:
             self.mouse_in_map = False
         # 背包格子
@@ -294,7 +311,29 @@ class GameWindow:
         return -1
 
     def _on_left_click(self, pos: Tuple[int, int]):
-        """鼠标左键：选中背包 / 放置建筑 / 合成 / 打开建筑面板 / 科技树"""
+        """鼠标左键：弹窗交互 / 合成 / 选中 / 放置 / 科技树"""
+        mx, my = pos
+
+        # 弹窗交互
+        if self.popup_building:
+            pr = self.popup_rect
+            # 关闭按钮（右上角 × 区域）
+            close_rect = pygame.Rect(pr.right - 30, pr.top + 4, 24, 20)
+            if close_rect.collidepoint(pos):
+                self.popup_building = None
+                return
+            # 标题栏拖拽
+            title_bar = pygame.Rect(pr.x, pr.y, pr.w, 28)
+            if title_bar.collidepoint(pos):
+                self.popup_dragging = True
+                self.popup_drag_off = (mx - pr.x, my - pr.y)
+                return
+            # 点击弹窗外 -> 关闭弹窗
+            if not pr.collidepoint(pos):
+                self.popup_building = None
+                return
+            return
+
         # 建筑面板：插件/科技树按钮
         if self.show_building_panel:
             self._click_building_panel(pos)
@@ -328,17 +367,18 @@ class GameWindow:
         if 0 <= mx < MAP_COLS * TILE_SIZE and 0 <= my < MAP_HEIGHT:
             gx = mx // TILE_SIZE
             gy = my // TILE_SIZE
-            # 有选中的建造材料 → 放置建筑
-            sel = self.player.selected_slot
-            if sel and sel.item_id in ITEM_TO_BUILDING:
+            # 先检查是否点击到建筑 → 弹窗
+            bld = self._building_at(gx, gy)
+            if bld:
+                self.popup_building = bld
+                self.selected_building = bld
+                self.popup_rect.topleft = (min(mx + 20, WIN_WIDTH - 380),
+                                           min(my - 40, WIN_HEIGHT - 300))
+            elif self.player.selected_slot and self.player.selected_slot.item_id in ITEM_TO_BUILDING:
+                # 无建筑 + 有建造材料 → 放置
                 self._place_with_selected(gx, gy)
             else:
-                # 点击建筑 → 选中，侧栏显示详情（不弹窗）
-                bld = self._building_at(gx, gy)
-                if bld:
-                    self.selected_building = bld
-                else:
-                    self.selected_building = None
+                self.selected_building = None
 
     def _building_at(self, gx: int, gy: int):
         """返回 (gx,gy) 处的建筑，没有则返回 None"""
@@ -1245,6 +1285,152 @@ class GameWindow:
             hint = self.font_small.render("无可用解锁项目  |  ESC 关闭", True, COLOR_TEXT_DIM)
         self.screen.blit(hint, (60, WIN_HEIGHT - 30))
 
+    def _draw_building_popup(self):
+        """科技感可拖动弹窗 - 左输入+插件 | 右输出"""
+        b = self.popup_building
+        if not b:
+            return
+        inv = self.player.inventory
+        pr = self.popup_rect
+        mx, my = pygame.mouse.get_pos()
+
+        # 合成半透明背景
+        s = pygame.Surface((pr.w, pr.h), pygame.SRCALPHA)
+
+        # 主体暗色（带蓝紫底光）
+        s.fill((12, 14, 24, 240))
+        self.screen.blit(s, pr)
+
+        # 外框发光
+        glow_color = (60, 160, 255, 60)
+        pygame.draw.rect(self.screen, glow_color, pr, 2, border_radius=8)
+
+        # 标题栏
+        title_bar = pygame.Rect(pr.x + 4, pr.y + 4, pr.w - 8, 26)
+        pygame.draw.rect(self.screen, (20, 30, 50), title_bar, border_radius=4)
+
+        # 标题图标+名称
+        icon = "⚙"
+        try:
+            ti = self.font_small.render(f"{icon} {b.name}", True, (140, 220, 255))
+        except Exception:
+            ti = self.font_small.render(f"> {b.name}", True, (140, 220, 255))
+        self.screen.blit(ti, (pr.x + 12, pr.y + 8))
+
+        # 关闭按钮 ×
+        close_r = pygame.Rect(pr.right - 28, pr.top + 6, 20, 18)
+        hover_close = close_r.collidepoint(mx, my)
+        cc = (255, 80, 80) if hover_close else (150, 150, 160)
+        pygame.draw.rect(self.screen, cc, close_r, border_radius=3)
+        cx_s = self.font_small.render("×", True, (255, 255, 255))
+        self.screen.blit(cx_s, (close_r.x + 5, close_r.y + 1))
+
+        y0 = pr.y + 36
+
+        # ── 左列: 输入 + 插件 ──
+        lx = pr.x + 14
+        col_w = (pr.w - 40) // 2
+
+        # 分区标题
+        def section_title(text, color=(100, 200, 255)):
+            return self.font_small.render(text, True, color)
+
+        # --- 输入 ---
+        self.screen.blit(section_title("▶ 输入"), (lx, y0))
+        yy = y0 + 20
+        if b.inputs:
+            for iid, amt in b.inputs.items():
+                from item import ITEM_TEMPLATES as _it
+                tmpl = _it.get(iid)
+                mn = tmpl.name if tmpl else iid
+                hv = inv.count(iid)
+                c = COLOR_TEXT if hv >= amt else (255, 80, 80)
+                txt = self.font_small.render(f"  {mn}  {hv}/{amt}", True, c)
+                self.screen.blit(txt, (lx, yy))
+                yy += 18
+        else:
+            self.screen.blit(self.font_small.render("  (无)", True, COLOR_TEXT_DIM), (lx, yy))
+            yy += 18
+        yy += 4
+
+        # --- 插件槽 ---
+        self.screen.blit(section_title("▶ 插件", (140, 200, 255)), (lx, yy))
+        yy += 20
+        for i in range(b.plugin_slots):
+            slot_r = pygame.Rect(lx + 2, yy, col_w - 8, 22)
+            if i < len(b.plugins):
+                pygame.draw.rect(self.screen, (30, 60, 40), slot_r, border_radius=3)
+                pygame.draw.rect(self.screen, (80, 180, 80), slot_r, 1, border_radius=3)
+                self.screen.blit(self.font_small.render(f"  P{i+1}: {b.plugins[i]}", True, (150, 255, 150)), (lx+4, yy+2))
+            else:
+                pygame.draw.rect(self.screen, (20, 24, 35), slot_r, border_radius=3)
+                pygame.draw.rect(self.screen, (40, 50, 60), slot_r, 1, border_radius=3)
+                self.screen.blit(self.font_small.render(f"  [空]", True, COLOR_TEXT_DIM), (lx+4, yy+2))
+            yy += 26
+
+        # ── 右列: 输出 ──
+        rx = pr.x + pr.w // 2 + 6
+        self.screen.blit(section_title("▶ 输出", (100, 255, 150)), (rx, y0))
+        yy = y0 + 20
+        if b.outputs:
+            for iid, amt in b.outputs.items():
+                from item import ITEM_TEMPLATES as _it
+                tmpl = _it.get(iid)
+                mn = tmpl.name if tmpl else iid
+                # 实际产量（受效率速度加成）
+                from tech_tree import get_building_bonuses
+                bonuses = get_building_bonuses(self.tech_unlocked)
+                actual = max(1, int(amt * (1+bonuses['efficiency']) * (1+bonuses['speed'])))
+                txt = self.font_small.render(f"  {mn}  x{actual}/cycle", True, COLOR_TEXT)
+                self.screen.blit(txt, (rx, yy))
+                yy += 18
+        else:
+            self.screen.blit(self.font_small.render("  (无)", True, COLOR_TEXT_DIM), (rx, yy))
+            yy += 18
+        yy += 4
+
+        # --- 输出缓冲（已有量） ---
+        self.screen.blit(section_title("▶ 库存", (180, 200, 220)), (rx, yy))
+        yy += 20
+        if b.outputs:
+            for iid, _ in b.outputs.items():
+                from item import ITEM_TEMPLATES as _it
+                tmpl = _it.get(iid)
+                mn = tmpl.name if tmpl else iid
+                hv = inv.count(iid)
+                txt = self.font_small.render(f"  {mn}  x{hv}", True, COLOR_TEXT)
+                self.screen.blit(txt, (rx, yy))
+                yy += 18
+        else:
+            self.screen.blit(self.font_small.render("  -", True, COLOR_TEXT_DIM), (rx, yy))
+            yy += 18
+
+        # ── 底部: 生产进度条 ──
+        by = pr.bottom - 24
+        if b.inputs and b.outputs:
+            bw = pr.w - 24
+            bh = 8
+            bx = pr.x + 12
+            progress = b.production_progress
+            # 背景
+            pygame.draw.rect(self.screen, (15, 20, 30), (bx, by, bw, bh), border_radius=4)
+            # 彩色渐变进度
+            if progress > 0:
+                fill = int(bw * progress)
+                for i in range(fill):
+                    r = int(60 + 180 * (i / fill))
+                    gb = int(180 - 120 * (i / fill))
+                    shade = (r, gb, 255, 255)
+                    pygame.draw.rect(self.screen, shade, (bx + i, by, 1, bh))
+            # 外框
+            pygame.draw.rect(self.screen, (60, 120, 200), (bx, by, bw, bh), 1, border_radius=4)
+            pct_txt = self.font_small.render(f"{int(progress*100)}%", True, (180, 220, 255))
+            self.screen.blit(pct_txt, (bx + bw - pct_txt.get_width() - 4, by - 2))
+
+        # 底部拖拽提示
+        hint = self.font_small.render("拖动标题栏移动  |  × 关闭", True, (80, 90, 110))
+        self.screen.blit(hint, (pr.x + 10, pr.bottom - 18))
+
     def _draw_help(self):
         if not self.show_help:
             return
@@ -1339,6 +1525,7 @@ class GameWindow:
             self._draw_demolish_bar()
             self._draw_messages()
             self._draw_building_panel()
+            self._draw_building_popup()
             self._draw_tech_tree()
             self._draw_backpack_ui()
             self._draw_help()
