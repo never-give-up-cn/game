@@ -20,12 +20,12 @@ from player import Player
 # ========== 常量 ==========
 
 TILE_SIZE = 40
-MAP_COLS, MAP_ROWS = 20, 12
+VIEWPORT_COLS, VIEWPORT_ROWS = 20, 12
 SIDEBAR_WIDTH = 160
 SIDEBAR_COLLAPSED = 24
 
-WIN_WIDTH = MAP_COLS * TILE_SIZE + SIDEBAR_WIDTH
-MAP_HEIGHT = MAP_ROWS * TILE_SIZE
+WIN_WIDTH = VIEWPORT_COLS * TILE_SIZE + SIDEBAR_WIDTH
+MAP_HEIGHT = VIEWPORT_ROWS * TILE_SIZE
 HOTBAR_HEIGHT = 110  # 底部背包栏高度
 WIN_HEIGHT = MAP_HEIGHT + HOTBAR_HEIGHT
 
@@ -100,7 +100,9 @@ class GameWindow:
         self.font_large = self._make_font(20)
 
         # 游戏数据
-        self.game_map = MapGrid(MAP_COLS, MAP_ROWS)
+        self.game_map = MapGrid()
+        self.camera_x = 0  # 相机世界坐标
+        self.camera_y = 0
         self._init_demo_buildings()
         self.player = Player(10, 6, "工程师")
         self.game_map.set_player(self.player)
@@ -210,7 +212,7 @@ class GameWindow:
                     # 检测侧栏折叠/展开点击
                     mx, my = event.pos
                     sw = SIDEBAR_COLLAPSED if self.sidebar_collapsed else SIDEBAR_WIDTH
-                    x0 = MAP_COLS * TILE_SIZE
+                    x0 = VIEWPORT_COLS * TILE_SIZE
                     if x0 <= mx <= x0 + sw and 0 <= my <= MAP_HEIGHT:
                         self.sidebar_collapsed = not self.sidebar_collapsed
                     else:
@@ -281,9 +283,9 @@ class GameWindow:
         """更新鼠标所在的格子坐标和悬浮索引"""
         mx, my = pos
         # 地图格子 + 建筑悬浮检测
-        if 0 <= mx < MAP_COLS * TILE_SIZE and 0 <= my < MAP_HEIGHT:
-            gx = mx // TILE_SIZE
-            gy = my // TILE_SIZE
+        if 0 <= mx < VIEWPORT_COLS * TILE_SIZE and 0 <= my < MAP_HEIGHT:
+            gx = mx // TILE_SIZE + self.camera_x
+            gy = my // TILE_SIZE + self.camera_y
             self.mouse_grid_pos = (gx, gy)
             self.mouse_in_map = True
             # 悬浮在建筑上 -> 侧栏显示信息
@@ -298,7 +300,7 @@ class GameWindow:
     def _get_clicked_slot(self, pos: Tuple[int, int]) -> int:
         """检测鼠标点击了哪个背包格子，返回索引 (-1 = 未命中)"""
         mx, my = pos
-        bar_rect = pygame.Rect(0, MAP_HEIGHT, MAP_COLS * TILE_SIZE, HOTBAR_HEIGHT)
+        bar_rect = pygame.Rect(0, MAP_HEIGHT, VIEWPORT_COLS * TILE_SIZE, HOTBAR_HEIGHT)
         if not bar_rect.collidepoint(mx, my):
             return -1
         # 计算格子参数 (与 _draw_hotbar 保持一致)
@@ -314,9 +316,9 @@ class GameWindow:
         for idx in range(slots_per_row * slot_rows):
             row = idx // slots_per_row
             col = idx % slots_per_row
-            cx = bar_x0 + col * (cell_w + gap)
-            cy = bar_y0 + row * (cell_h + gap)
-            if cx <= mx <= cx + cell_w and cy <= my <= cy + cell_h:
+            sx = bar_x0 + col * (cell_w + gap)
+            sy = bar_y0 + row * (cell_h + gap)
+            if sx <= mx <= sx + cell_w and sy <= my <= sy + cell_h:
                 return idx
         return -1
 
@@ -353,9 +355,9 @@ class GameWindow:
 
         # 点击地图
         mx, my = pos
-        if 0 <= mx < MAP_COLS * TILE_SIZE and 0 <= my < MAP_HEIGHT:
-            gx = mx // TILE_SIZE
-            gy = my // TILE_SIZE
+        if 0 <= mx < VIEWPORT_COLS * TILE_SIZE and 0 <= my < MAP_HEIGHT:
+            gx = mx // TILE_SIZE + self.camera_x
+            gy = my // TILE_SIZE + self.camera_y
             # 先检查是否点击到建筑 → 弹窗
             bld = self._building_at(gx, gy)
             if bld:
@@ -378,7 +380,7 @@ class GameWindow:
     def _on_right_down(self, pos: Tuple[int, int]):
         """右键按下：开始拆除建筑"""
         mx, my = pos
-        if 0 <= mx < MAP_COLS * TILE_SIZE and 0 <= my < MAP_HEIGHT:
+        if 0 <= mx < VIEWPORT_COLS * TILE_SIZE and 0 <= my < MAP_HEIGHT:
             gx, gy = mx // TILE_SIZE, my // TILE_SIZE
             bld = self._building_at(gx, gy)
             if bld:
@@ -423,11 +425,11 @@ class GameWindow:
         elif key == pygame.K_w:
             self.py = max(0, self.py - 1)
         elif key == pygame.K_s:
-            self.py = min(MAP_ROWS - 1, self.py + 1)
+            self.py = min(VIEWPORT_ROWS - 1, self.py + 1)
         elif key == pygame.K_a:
             self.px = max(0, self.px - 1)
         elif key == pygame.K_d:
-            self.px = min(MAP_COLS - 1, self.px + 1)
+            self.px = min(VIEWPORT_COLS - 1, self.px + 1)
 
     def _confirm_place(self):
         name = BUILDING_NAMES[self.place_idx]
@@ -445,7 +447,7 @@ class GameWindow:
             return
         # 检查鼠标是否还在同一个建筑上
         mx, my = pygame.mouse.get_pos()
-        if not (0 <= mx < MAP_COLS * TILE_SIZE and 0 <= my < MAP_HEIGHT):
+        if not (0 <= mx < VIEWPORT_COLS * TILE_SIZE and 0 <= my < MAP_HEIGHT):
             self._cancel_demolish()
             return
         gx, gy = mx // TILE_SIZE, my // TILE_SIZE
@@ -460,10 +462,16 @@ class GameWindow:
             self._cancel_demolish()
             self.right_held = False
 
+    def _update_camera(self):
+        """相机跟随玩家，居中显示"""
+        self.camera_x = self.player.x - VIEWPORT_COLS // 2
+        self.camera_y = self.player.y - VIEWPORT_ROWS // 2
+
     def _update_movement(self):
-        """每帧根据持续按住的键移动（支持斜向）"""
+        """每帧更新移动 + 相机跟随"""
         self.anim_frame += 1
         self._tick_demolish()
+        self._update_camera()
         if self.placing or self.show_help or self.show_backpack or self.show_building_panel or self.show_tech_tree:
             return
 
@@ -492,14 +500,40 @@ class GameWindow:
     # ========== 渲染 ==========
 
     def _draw_grid(self):
-        for y in range(MAP_ROWS):
-            for x in range(MAP_COLS):
-                rect = pygame.Rect(x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE)
-                tile = self.game_map.get_tile(x, y)
-                if tile == TileType.EMPTY:
+        for vy in range(VIEWPORT_ROWS):
+            for vx in range(VIEWPORT_COLS):
+                wx = self.camera_x + vx
+                wy = self.camera_y + vy
+                rect = pygame.Rect(vx * TILE_SIZE, vy * TILE_SIZE, TILE_SIZE, TILE_SIZE)
+                tile = self.game_map.get_tile(wx, wy)
+                # 资源矿脉着色
+                ore_color = None
+                if tile == TileType.ORE:
+                    ore_color = (120, 100, 60)
+                    # 根据矿石类型微调色
+                    o = self.game_map.get_ore(wx, wy)
+                    if o:
+                        ore_shades = {
+                            'iron_ore': (140, 120, 100), 'copper_ore': (160, 100, 80),
+                            'tungsten_ore': (100, 120, 140), 'holmium_ore': (120, 80, 140),
+                            'uranium_ore': (100, 200, 100),
+                        }
+                        ore_color = ore_shades.get(o, (120, 100, 60))
+                    pygame.draw.rect(self.screen, ore_color, rect)
+                    # 矿脉标记
+                    pygame.draw.circle(self.screen, (180, 160, 100), rect.center, 8)
+                elif tile == TileType.FLUID:
+                    pygame.draw.rect(self.screen, (60, 100, 140), rect)
+                elif tile == TileType.BIO:
+                    pygame.draw.rect(self.screen, (60, 120, 60), rect)
+                elif tile == TileType.WATER:
+                    pygame.draw.rect(self.screen, (40, 80, 120), rect)
+                elif tile == TileType.TREE:
+                    pygame.draw.rect(self.screen, (50, 100, 50), rect)
+                elif tile == TileType.EMPTY:
                     pygame.draw.rect(self.screen, COLOR_EMPTY, rect)
                 elif tile == TileType.BUILDING:
-                    self._draw_building_cell(x, y, rect)
+                    self._draw_building_cell(wx, wy, rect)
                 pygame.draw.rect(self.screen, COLOR_GRID, rect, 1)
 
     def _draw_building_cell(self, gx: int, gy: int, rect: pygame.Rect):
@@ -568,8 +602,8 @@ class GameWindow:
 
         # 方向箭头（机械臂 / 传送带 / 地下）
         if bld and hasattr(bld, 'direction'):
-            cx2 = rect.centerx
-            cy2 = rect.centery
+            sx2 = rect.centerx
+            sy2 = rect.centery
             dir_angle = bld.direction * 90
             import math as m2
             rad = m2.radians(dir_angle)
@@ -579,9 +613,9 @@ class GameWindow:
                 arrow_c = tier_colors[min(bld.belt_tier, 3) - 1]
             else:
                 arrow_c = (255, 220, 80)  # 机械臂金色
-            end_x = cx2 + int(12 * m2.sin(rad))
-            end_y = cy2 - int(12 * m2.cos(rad))
-            pygame.draw.line(self.screen, arrow_c, (cx2, cy2), (end_x, end_y), 3)
+            end_x = sx2 + int(12 * m2.sin(rad))
+            end_y = sy2 - int(12 * m2.cos(rad))
+            pygame.draw.line(self.screen, arrow_c, (sx2, sy2), (end_x, end_y), 3)
             tip_size = 5
             for a in (dir_angle + 150, dir_angle - 150):
                 tx = end_x + int(tip_size * m2.sin(m2.radians(a)))
@@ -589,8 +623,9 @@ class GameWindow:
                 pygame.draw.line(self.screen, arrow_c, (end_x, end_y), (tx, ty), 2)
 
     def _draw_player(self):
-        cx = self.player.x * TILE_SIZE + TILE_SIZE // 2
-        cy = self.player.y * TILE_SIZE + TILE_SIZE // 2
+        # 世界坐标 → 屏幕坐标（相机偏移）
+        sx = (self.player.x - self.camera_x) * TILE_SIZE + TILE_SIZE // 2
+        sy = (self.player.y - self.camera_y) * TILE_SIZE + TILE_SIZE // 2
         r = TILE_SIZE // 2 - 4
 
         # 呼吸光圈（整个格子大小的脉冲光晕）
@@ -603,21 +638,21 @@ class GameWindow:
                 continue
             s = pygame.Surface((sr * 2, sr * 2), pygame.SRCALPHA)
             pygame.draw.circle(s, (255, 200, 50, max(0, alpha)), (sr, sr), sr)
-            self.screen.blit(s, (cx - sr, cy - sr))
+            self.screen.blit(s, (sx - sr, sy - sr))
 
         # 身体
-        pygame.draw.circle(self.screen, COLOR_PLAYER_OUTLINE, (cx, cy), r + 1)
-        pygame.draw.circle(self.screen, COLOR_PLAYER, (cx, cy), r)
+        pygame.draw.circle(self.screen, COLOR_PLAYER_OUTLINE, (sx, sy), r + 1)
+        pygame.draw.circle(self.screen, COLOR_PLAYER, (sx, sy), r)
         # 眼睛
         off = r // 3
         for ex, ey in [(-off, -off), (off, -off)]:
-            pygame.draw.circle(self.screen, (0, 0, 0), (cx + ex, cy + ey), 3)
+            pygame.draw.circle(self.screen, (0, 0, 0), (sx + ex, sy + ey), 3)
         # 表情（微笑）
         pygame.draw.arc(self.screen, (0, 0, 0),
-                        (cx - off, cy - 1, off * 2, off + 2), 0, 3.14, 2)
+                        (sx - off, sy - 1, off * 2, off + 2), 0, 3.14, 2)
 
     def _draw_sidebar(self):
-        x0 = MAP_COLS * TILE_SIZE
+        x0 = VIEWPORT_COLS * TILE_SIZE
         inv = self.player.inventory
 
         if self.sidebar_collapsed:
@@ -642,7 +677,9 @@ class GameWindow:
         y = 16
 
         # 标题
-        title = self.font_large.render("信息", True, COLOR_HIGHLIGHT)
+        from resource_gen import get_planet_at
+        _planet = get_planet_at(self.player.x, self.player.y)
+        title = self.font_small.render(f"[{_planet.upper()}] 信息", True, COLOR_HIGHLIGHT)
         self.screen.blit(title, (x, y))
         y += 28
 
@@ -827,18 +864,18 @@ class GameWindow:
         gap = 6
 
         total_w = slots_per_row * (cell_w + gap) - gap
-        bar_rect = pygame.Rect(0, MAP_HEIGHT, MAP_COLS * TILE_SIZE, HOTBAR_HEIGHT)
+        bar_rect = pygame.Rect(0, MAP_HEIGHT, VIEWPORT_COLS * TILE_SIZE, HOTBAR_HEIGHT)
         pygame.draw.rect(self.screen, COLOR_HOTBAR_BG, bar_rect)
         pygame.draw.line(self.screen, COLOR_HOTBAR_BORDER,
-                         (0, MAP_HEIGHT), (MAP_COLS * TILE_SIZE, MAP_HEIGHT), 3)
+                         (0, MAP_HEIGHT), (VIEWPORT_COLS * TILE_SIZE, MAP_HEIGHT), 3)
 
         for idx in range(slots_per_row * slot_rows):
             row = idx // slots_per_row
             col = idx % slots_per_row
-            cx = bar_rect.x + (bar_rect.width - total_w) // 2 + col * (cell_w + gap)
-            cy = bar_rect.y + 6 + row * (cell_h + gap)
+            sx = bar_rect.x + (bar_rect.width - total_w) // 2 + col * (cell_w + gap)
+            sy = bar_rect.y + 6 + row * (cell_h + gap)
 
-            slot_rect = pygame.Rect(cx, cy, cell_w, cell_h)
+            slot_rect = pygame.Rect(sx, sy, cell_w, cell_h)
             stack = inv.slots[idx] if idx < len(inv.slots) else None
             is_selected = (idx == inv.selected and stack is not None)
             is_hover = (idx == self.hover_slot_idx and not is_selected)
@@ -862,18 +899,18 @@ class GameWindow:
                     icon = self.font_large.render(stack.item.icon, True, COLOR_TEXT)
                 except Exception:
                     icon = self.font_large.render("?", True, COLOR_TEXT)
-                ix = cx + (cell_w - icon.get_width()) // 2
-                self.screen.blit(icon, (ix, cy + 2))
+                ix = sx + (cell_w - icon.get_width()) // 2
+                self.screen.blit(icon, (ix, sy + 2))
                 # 数量
                 if stack.quantity > 1:
                     qty = self.font_small.render(str(stack.quantity), True, COLOR_HIGHLIGHT)
-                    self.screen.blit(qty, (cx + cell_w - qty.get_width() - 3,
-                                           cy + cell_h - qty.get_height() - 2))
+                    self.screen.blit(qty, (sx + cell_w - qty.get_width() - 3,
+                                           sy + cell_h - qty.get_height() - 2))
 
             # 编号
             if row == 0:
                 num = self.font_small.render(str(col + 1), True, COLOR_TEXT_DIM)
-                self.screen.blit(num, (cx + 3, cy + 2))
+                self.screen.blit(num, (sx + 3, sy + 2))
 
         # 选中物品名称（-1=空手）
         sel_idx = inv.selected
@@ -1011,17 +1048,17 @@ class GameWindow:
         ox, oy = px+pw//2, py+50
         def np(nid): c,r = layout.get(nid,(0,0)); return int(ox+c*CS), int(oy+r*TG)
         for node in TECH_NODES.values():
-            cx,cy = np(node.node_id)
+            sx,sy = np(node.node_id)
             for pid in node.parent_ids:
                 if pid not in layout: continue
                 px2,py2 = np(pid); col = (80,120,80) if pid in self.tech_unlocked else (50,50,55)
-                my2 = (py2+25+cy-25)//2
+                my2 = (py2+25+sy-25)//2
                 pygame.draw.line(self.screen, col, (px2,py2+25),(px2,my2),2)
-                pygame.draw.line(self.screen, col, (px2,my2),(cx,my2),2)
-                pygame.draw.line(self.screen, col, (cx,my2),(cx,cy-25),2)
+                pygame.draw.line(self.screen, col, (px2,my2),(sx,my2),2)
+                pygame.draw.line(self.screen, col, (sx,my2),(sx,sy-25),2)
         for node in TECH_NODES.values():
-            cx,cy = np(node.node_id); nh = 50+len(node.science_packs)*16
-            rx,ry = cx-NW//2, cy-nh//2; rect = pygame.Rect(rx,ry,NW,nh)
+            sx,sy = np(node.node_id); nh = 50+len(node.science_packs)*16
+            rx,ry = sx-NW//2, sy-nh//2; rect = pygame.Rect(rx,ry,NW,nh)
             unlocked = node.node_id in self.tech_unlocked
             can = node.can_unlock(inv, self.tech_unlocked)
             parents_ok = all(p in self.tech_unlocked for p in node.parent_ids)
@@ -1120,19 +1157,19 @@ class GameWindow:
         ]
 
         for si, (title_text, items) in enumerate(sections):
-            cx = col_x[si % 3]
-            cy = 65 + (si // 3) * 220
+            sx = col_x[si % 3]
+            sy = 65 + (si // 3) * 220
 
             sec_title = self.font.render(title_text, True, COLOR_HIGHLIGHT)
-            self.screen.blit(sec_title, (cx, cy))
-            cy += 24
+            self.screen.blit(sec_title, (sx, sy))
+            sy += 24
 
             for key, desc in items:
                 key_surf = self.font_small.render(key, True, (180, 200, 255))
-                self.screen.blit(key_surf, (cx, cy))
+                self.screen.blit(key_surf, (sx, sy))
                 desc_surf = self.font_small.render(desc, True, COLOR_TEXT)
-                self.screen.blit(desc_surf, (cx + key_surf.get_width() + 8, cy))
-                cy += 20
+                self.screen.blit(desc_surf, (sx + key_surf.get_width() + 8, sy))
+                sy += 20
 
         # 底部退出提示
         hint = self.font_small.render("H 键关闭指南", True, COLOR_TEXT_DIM)
