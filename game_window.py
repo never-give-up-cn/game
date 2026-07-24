@@ -139,7 +139,7 @@ class GameWindow:
         # 选中建筑 + 弹窗 + 动画帧
         self.selected_building = None
         self.popup_building = None
-        self.popup_rect = pygame.Rect(WIN_WIDTH//2-180, 80, 360, 280)
+        self.popup_rect = pygame.Rect(WIN_WIDTH//2-190, 80, 380, 300)
         self.popup_dragging = False
         self.popup_drag_off = (0, 0)
         self.anim_frame = 0
@@ -328,10 +328,10 @@ class GameWindow:
                 self.popup_dragging = True
                 self.popup_drag_off = (mx - pr.x, my - pr.y)
                 return
-            # 点击弹窗外 -> 关闭弹窗
+            # 点击弹窗外 -> 关闭弹窗后继续处理点击
             if not pr.collidepoint(pos):
                 self.popup_building = None
-                return
+                # 不 return，继续执行下方的点击处理
             return
 
         # 建筑面板：插件/科技树按钮
@@ -1286,150 +1286,202 @@ class GameWindow:
         self.screen.blit(hint, (60, WIN_HEIGHT - 30))
 
     def _draw_building_popup(self):
-        """科技感可拖动弹窗 - 左输入+插件 | 右输出"""
+        """科技感可拖动弹窗 - 左输入+插件 | 右生产+状态"""
         b = self.popup_building
         if not b:
             return
         inv = self.player.inventory
         pr = self.popup_rect
         mx, my = pygame.mouse.get_pos()
+        from item import ITEM_TEMPLATES as _it
+        from tech_tree import get_building_bonuses
 
-        # 合成半透明背景
+        bonuses = get_building_bonuses(self.tech_unlocked)
+
+        # ── 判断设备状态 ──
+        has_inputs = bool(b.inputs)
+        has_outputs = bool(b.outputs)
+        has_mats = has_inputs and all(inv.count(iid) >= amt for iid, amt in b.inputs.items())
+        output_full = has_outputs and any(inv.count(oid) >= 20 for oid in b.outputs)
+
+        if not has_inputs and not has_outputs:
+            status_text = "⏸ 已暂停"
+            status_color = (140, 150, 160)
+        elif output_full:
+            status_text = "📦 产出堆满"
+            status_color = (220, 200, 60)
+        elif has_inputs and has_mats:
+            status_text = "⚡ 运行中"
+            status_color = (80, 220, 120)
+        elif has_inputs and not has_mats:
+            status_text = "⏸ 原料不足"
+            status_color = (255, 170, 60)
+        else:
+            status_text = "⏸ 待机"
+            status_color = (140, 150, 160)
+
+        # ── 背景 ──
         s = pygame.Surface((pr.w, pr.h), pygame.SRCALPHA)
-
-        # 主体暗色（带蓝紫底光）
-        s.fill((12, 14, 24, 240))
+        s.fill((12, 14, 24, 245))
         self.screen.blit(s, pr)
 
-        # 外框发光
-        glow_color = (60, 160, 255, 60)
-        pygame.draw.rect(self.screen, glow_color, pr, 2, border_radius=8)
+        # 外框（状态色）
+        border_c = (60, 160, 255)
+        pygame.draw.rect(self.screen, border_c, pr, 2, border_radius=8)
 
-        # 标题栏
-        title_bar = pygame.Rect(pr.x + 4, pr.y + 4, pr.w - 8, 26)
-        pygame.draw.rect(self.screen, (20, 30, 50), title_bar, border_radius=4)
+        # ── 标题栏（加深分层） ──
+        title_bar = pygame.Rect(pr.x + 4, pr.y + 4, pr.w - 8, 28)
+        pygame.draw.rect(self.screen, (16, 22, 40), title_bar, border_radius=4)
+        ti = self.font_small.render(f"□ {b.name}", True, (140, 220, 255))
+        self.screen.blit(ti, (pr.x + 14, pr.y + 8))
 
-        # 标题图标+名称
-        icon = "⚙"
-        try:
-            ti = self.font_small.render(f"{icon} {b.name}", True, (140, 220, 255))
-        except Exception:
-            ti = self.font_small.render(f"> {b.name}", True, (140, 220, 255))
-        self.screen.blit(ti, (pr.x + 12, pr.y + 8))
-
-        # 关闭按钮 ×
+        # 关闭 ×
         close_r = pygame.Rect(pr.right - 28, pr.top + 6, 20, 18)
         hover_close = close_r.collidepoint(mx, my)
-        cc = (255, 80, 80) if hover_close else (150, 150, 160)
+        cc = (255, 80, 80) if hover_close else (120, 130, 150)
         pygame.draw.rect(self.screen, cc, close_r, border_radius=3)
-        cx_s = self.font_small.render("×", True, (255, 255, 255))
-        self.screen.blit(cx_s, (close_r.x + 5, close_r.y + 1))
+        self.screen.blit(self.font_small.render("×", True, (255, 255, 255)), (close_r.x + 5, close_r.y + 1))
 
-        y0 = pr.y + 36
+        # 仅在悬浮标题栏时显示拖动提示
+        title_hover = title_bar.collidepoint(mx, my)
+        if title_hover and not hover_close:
+            hint = self.font_small.render("拖动移动", True, (100, 140, 180))
+            self.screen.blit(hint, (pr.x + pr.w // 2 - hint.get_width() // 2, pr.y + 8))
 
-        # ── 左列: 输入 + 插件 ──
-        lx = pr.x + 14
-        col_w = (pr.w - 40) // 2
+        # ── 内部区域 ──
+        inner_x = pr.x + 12
+        inner_w = pr.w - 24
+        col_w = (inner_w - 12) // 2
+        lx = inner_x          # 左列
+        rx = inner_x + col_w + 12  # 右列
+        yy = pr.y + 40
 
-        # 分区标题
-        def section_title(text, color=(100, 200, 255)):
-            return self.font_small.render(text, True, color)
+        # ── 左列: 原料输入 ──
+        self.screen.blit(self.font_small.render("【原料输入】", True, (120, 180, 220)), (lx, yy))
+        yy += 20
+        # 分割线
+        pygame.draw.line(self.screen, (30, 40, 55), (lx, yy), (lx + col_w - 4, yy), 1)
+        yy += 4
 
-        # --- 输入 ---
-        self.screen.blit(section_title("▶ 输入"), (lx, y0))
-        yy = y0 + 20
         if b.inputs:
             for iid, amt in b.inputs.items():
-                from item import ITEM_TEMPLATES as _it
                 tmpl = _it.get(iid)
+                icon = tmpl.icon if tmpl else "?"
                 mn = tmpl.name if tmpl else iid
                 hv = inv.count(iid)
-                c = COLOR_TEXT if hv >= amt else (255, 80, 80)
-                txt = self.font_small.render(f"  {mn}  {hv}/{amt}", True, c)
-                self.screen.blit(txt, (lx, yy))
+                enough = hv >= amt
+                # 暖橙替代红色，更舒适
+                c = COLOR_TEXT if enough else (255, 170, 60)
+                txt = self.font_small.render(f"{icon} {mn}  {hv}/{amt}", True, c)
+                self.screen.blit(txt, (lx + 4, yy))
                 yy += 18
         else:
-            self.screen.blit(self.font_small.render("  (无)", True, COLOR_TEXT_DIM), (lx, yy))
+            self.screen.blit(self.font_small.render("  无需原料", True, COLOR_TEXT_DIM), (lx + 4, yy))
             yy += 18
+        yy += 6
+
+        # ── 左列: 插件插槽（可视化卡槽） ──
+        self.screen.blit(self.font_small.render("【插件插槽】", True, (140, 180, 200)), (lx, yy))
+        yy += 20
+        pygame.draw.line(self.screen, (30, 40, 55), (lx, yy), (lx + col_w - 4, yy), 1)
         yy += 4
 
-        # --- 插件槽 ---
-        self.screen.blit(section_title("▶ 插件", (140, 200, 255)), (lx, yy))
-        yy += 20
+        slot_w = col_w - 12
         for i in range(b.plugin_slots):
-            slot_r = pygame.Rect(lx + 2, yy, col_w - 8, 22)
-            if i < len(b.plugins):
-                pygame.draw.rect(self.screen, (30, 60, 40), slot_r, border_radius=3)
-                pygame.draw.rect(self.screen, (80, 180, 80), slot_r, 1, border_radius=3)
-                self.screen.blit(self.font_small.render(f"  P{i+1}: {b.plugins[i]}", True, (150, 255, 150)), (lx+4, yy+2))
-            else:
-                pygame.draw.rect(self.screen, (20, 24, 35), slot_r, border_radius=3)
-                pygame.draw.rect(self.screen, (40, 50, 60), slot_r, 1, border_radius=3)
-                self.screen.blit(self.font_small.render(f"  [空]", True, COLOR_TEXT_DIM), (lx+4, yy+2))
-            yy += 26
+            slot_r = pygame.Rect(lx + 4, yy, slot_w, 26)
+            slot_hover = slot_r.collidepoint(mx, my)
 
-        # ── 右列: 输出 ──
-        rx = pr.x + pr.w // 2 + 6
-        self.screen.blit(section_title("▶ 输出", (100, 255, 150)), (rx, y0))
-        yy = y0 + 20
+            if i < len(b.plugins):  # 已插入
+                pygame.draw.rect(self.screen, (30, 55, 40), slot_r, border_radius=4)
+                pygame.draw.rect(self.screen, (80, 180, 80), slot_r, 1, border_radius=4)
+                self.screen.blit(self.font_small.render(f"  ● {b.plugins[i]}", True, (150, 255, 150)), (lx+8, yy+4))
+            else:  # 空槽
+                bg = (22, 28, 42) if not slot_hover else (30, 40, 60)
+                pygame.draw.rect(self.screen, bg, slot_r, border_radius=4)
+                # 虚线边框（短线段模拟）
+                for dx in range(2, slot_w - 4, 8):
+                    pygame.draw.rect(self.screen, (50, 65, 85), (lx + 6 + dx, yy + 2, 4, slot_r.h - 4))
+                border_c2 = (80, 100, 130) if slot_hover else (50, 60, 75)
+                pygame.draw.rect(self.screen, border_c2, slot_r, 1, border_radius=4)
+                if slot_hover:
+                    self.screen.blit(self.font_small.render("  放入插件", True, (120, 180, 220)), (lx+8, yy+4))
+                else:
+                    self.screen.blit(self.font_small.render("  空", True, COLOR_TEXT_DIM), (lx+8, yy+4))
+            yy += 30
+
+        # ── 右列: 生产信息 ──
+        self.screen.blit(self.font_small.render("【生产信息】", True, (100, 220, 150)), (rx, pr.y + 40))
+        yy = pr.y + 60
+        pygame.draw.line(self.screen, (30, 40, 55), (rx, yy), (rx + col_w - 4, yy), 1)
+        yy += 6
+
         if b.outputs:
             for iid, amt in b.outputs.items():
-                from item import ITEM_TEMPLATES as _it
                 tmpl = _it.get(iid)
+                icon = tmpl.icon if tmpl else "?"
                 mn = tmpl.name if tmpl else iid
-                # 实际产量（受效率速度加成）
-                from tech_tree import get_building_bonuses
-                bonuses = get_building_bonuses(self.tech_unlocked)
                 actual = max(1, int(amt * (1+bonuses['efficiency']) * (1+bonuses['speed'])))
-                txt = self.font_small.render(f"  {mn}  x{actual}/cycle", True, COLOR_TEXT)
-                self.screen.blit(txt, (rx, yy))
+                self.screen.blit(
+                    self.font_small.render(f"产出：{icon} {mn}  ×{actual}/周期", True, COLOR_TEXT), (rx + 4, yy))
                 yy += 18
         else:
-            self.screen.blit(self.font_small.render("  (无)", True, COLOR_TEXT_DIM), (rx, yy))
+            self.screen.blit(self.font_small.render("  无产出", True, COLOR_TEXT_DIM), (rx + 4, yy))
             yy += 18
-        yy += 4
 
-        # --- 输出缓冲（已有量） ---
-        self.screen.blit(section_title("▶ 库存", (180, 200, 220)), (rx, yy))
-        yy += 20
-        if b.outputs:
+        # 当前库存
+        has_output_stock = b.outputs and any(inv.count(oid) > 0 for oid in b.outputs)
+        if has_output_stock:
             for iid, _ in b.outputs.items():
-                from item import ITEM_TEMPLATES as _it
                 tmpl = _it.get(iid)
+                icon = tmpl.icon if tmpl else "?"
                 mn = tmpl.name if tmpl else iid
                 hv = inv.count(iid)
-                txt = self.font_small.render(f"  {mn}  x{hv}", True, COLOR_TEXT)
-                self.screen.blit(txt, (rx, yy))
+                self.screen.blit(
+                    self.font_small.render(f"当前库存：{icon} {mn}  ×{hv}", True, COLOR_TEXT_DIM), (rx + 4, yy))
                 yy += 18
         else:
-            self.screen.blit(self.font_small.render("  -", True, COLOR_TEXT_DIM), (rx, yy))
+            self.screen.blit(self.font_small.render("  无库存", True, COLOR_TEXT_DIM), (rx + 4, yy))
             yy += 18
+        yy += 6
 
-        # ── 底部: 生产进度条 ──
-        by = pr.bottom - 24
-        if b.inputs and b.outputs:
-            bw = pr.w - 24
-            bh = 8
-            bx = pr.x + 12
+        # ── 右列: 运行进度 + 状态 ──
+        self.screen.blit(self.font_small.render("【运行进度】", True, (200, 180, 120)), (rx, yy))
+        yy += 20
+        pygame.draw.line(self.screen, (30, 40, 55), (rx, yy), (rx + col_w - 4, yy), 1)
+        yy += 6
+
+        if has_inputs and has_outputs:
+            bw = col_w - 8
+            bh = 10
+            bx = rx + 4
             progress = b.production_progress
-            # 背景
-            pygame.draw.rect(self.screen, (15, 20, 30), (bx, by, bw, bh), border_radius=4)
-            # 彩色渐变进度
+
+            # 进度条背景
+            pygame.draw.rect(self.screen, (18, 22, 34), (bx, yy, bw, bh), border_radius=5)
+            # 彩色填充（状态色渐变）
             if progress > 0:
                 fill = int(bw * progress)
                 for i in range(fill):
-                    r = int(60 + 180 * (i / fill))
-                    gb = int(180 - 120 * (i / fill))
-                    shade = (r, gb, 255, 255)
-                    pygame.draw.rect(self.screen, shade, (bx + i, by, 1, bh))
+                    ratio = i / max(fill, 1)
+                    r = int(60 + 180 * ratio)
+                    g = int(200 - 120 * ratio)
+                    b2 = int(255 - 80 * ratio)
+                    pygame.draw.rect(self.screen, (r, g, b2), (bx + i, yy + 1, 1, bh - 2))
             # 外框
-            pygame.draw.rect(self.screen, (60, 120, 200), (bx, by, bw, bh), 1, border_radius=4)
-            pct_txt = self.font_small.render(f"{int(progress*100)}%", True, (180, 220, 255))
-            self.screen.blit(pct_txt, (bx + bw - pct_txt.get_width() - 4, by - 2))
+            fg = status_color if has_mats else (80, 70, 60)
+            pygame.draw.rect(self.screen, fg, (bx, yy, bw, bh), 1, border_radius=5)
 
-        # 底部拖拽提示
-        hint = self.font_small.render("拖动标题栏移动  |  × 关闭", True, (80, 90, 110))
-        self.screen.blit(hint, (pr.x + 10, pr.bottom - 18))
+            # 进度百分比（居中）
+            pct_txt = self.font_small.render(f"生产进度 {int(progress*100)}%", True, (180, 200, 220))
+            self.screen.blit(pct_txt, (bx + 4, yy - 1))
+        else:
+            self.screen.blit(self.font_small.render("  无需生产", True, COLOR_TEXT_DIM), (rx + 4, yy))
+
+        yy += 18
+
+        # 状态标签（核心）
+        status_tag = self.font_small.render(f"状态：{status_text}", True, status_color)
+        self.screen.blit(status_tag, (rx + 4, yy))
 
     def _draw_help(self):
         if not self.show_help:
