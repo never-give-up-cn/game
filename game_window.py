@@ -459,7 +459,7 @@ class GameWindow:
             if bld:
                 self.selected_building = bld
                 # 传送带/分流器等纯物流建筑不弹窗
-                if hasattr(bld, 'lanes') or hasattr(bld, 'input_buf'):
+                if hasattr(bld, 'lanes') or hasattr(bld, 'input_buf') or hasattr(bld, 'is_conveyor'):
                     self.panel_building = None
                     self.show_building_panel = False
                 else:
@@ -526,7 +526,8 @@ class GameWindow:
             return
         gx, gy = self.mouse_grid_pos
         bld = self._building_at(gx, gy)
-        if bld and hasattr(bld, 'lanes'):
+        from conveyor import ConveyorBelt as _Cv
+        if bld and (isinstance(bld, _Cv) or hasattr(bld, 'lanes')):
             for try_lane in ("left", "right"):
                 if bld.add_item(self.cursor_item, try_lane):
                     self.cursor_count -= 1
@@ -550,7 +551,8 @@ class GameWindow:
         """F: 拾取脚下物品（玩家所在格）"""
         gx, gy = self.player.x, self.player.y
         bld = self._building_at(gx, gy)
-        if bld and hasattr(bld, 'lanes'):
+        from conveyor import ConveyorBelt as _Cv2
+        if bld and (isinstance(bld, _Cv2) or hasattr(bld, 'lanes')):
             for ln in ("left", "right"):
                 lane = bld.lanes.get(ln, [])
                 if lane:
@@ -889,7 +891,7 @@ class GameWindow:
                 pygame.draw.line(self.screen, arrow_c, (end_x, end_y), (tx, ty), 2)
 
         # 传送带物品渲染 (progress 模型)
-        if bld and hasattr(bld, 'lanes'):
+        if bld and (hasattr(bld, 'lanes') or hasattr(bld, 'is_conveyor')):
             from item import ITEM_TEMPLATES as _belt_it
             dir_angle = bld.direction * 90
             rad = math.radians(dir_angle)

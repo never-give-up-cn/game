@@ -19,7 +19,12 @@ class ConveyorBelt(BuildingBase):
         self.belt_speed = BELT_SPECS.get(self.tier, 7.5/60)
         self.capacity = 4
         self.lanes: Dict[str, List[dict]] = {"left": [], "right": []}
+        self.is_conveyor = True  # 类型标记, 供 hasattr 检测
         self.game_map: Optional["MapGrid"] = None
+
+    @property
+    def has_lanes(self) -> bool:
+        return True
 
     def rotate(self): self.direction = (self.direction + 1) % 4
 
