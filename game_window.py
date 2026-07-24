@@ -944,68 +944,144 @@ class GameWindow:
         if not self.show_tech_tree:
             return
         inv = self.player.inventory
+        mx, my = pygame.mouse.get_pos()
+
+        # 半透明背景
         overlay = pygame.Surface((WIN_WIDTH, WIN_HEIGHT), pygame.SRCALPHA)
         overlay.fill((10, 10, 15, 240))
         self.screen.blit(overlay, (0, 0))
 
-        t = self.font_large.render("科 技 树", True, COLOR_HIGHLIGHT)
-        self.screen.blit(t, (WIN_WIDTH//2 - t.get_width()//2, 30))
+        title = self.font_large.render("科 技 树", True, COLOR_HIGHLIGHT)
+        self.screen.blit(title, (WIN_WIDTH//2 - title.get_width()//2, 25))
 
-        self._tech_buttons = []
-        y = 80
-        mx, my = pygame.mouse.get_pos()
+        # ── 树形布局计算 ──
+        NODE_W, NODE_H = 170, 62
+        TIER_GAP = 100
+        COL_SPACING = NODE_W + 40
 
-        for tier in range(1, 5):
-            nodes = [n for n in TECH_NODES.values() if n.tier == tier]
-            if not nodes:
-                continue
-            tl = self.font.render(f"── Tier {tier} ──", True, COLOR_TEXT_DIM)
-            self.screen.blit(tl, (60, y))
-            y += 28
+        # 按 tier 分组
+        tiers: Dict[int, List] = {}
+        for n in TECH_NODES.values():
+            tiers.setdefault(n.tier, []).append(n)
 
-            for node in nodes:
-                unlocked = node.node_id in self.tech_unlocked
-                can = node.can_unlock(inv, self.tech_unlocked)
-                parents = all(p in self.tech_unlocked for p in node.parent_ids)
+        # 计算每个节点的 (col, row) 位置
+        # col: 水平偏移(整型), row: tier-1
+        layout = {}  # node_id -> (col, row)
 
-                rh = 50
-                rr = pygame.Rect(60, y, WIN_WIDTH - 120, rh)
-                hover = rr.collidepoint(mx, my)
+        # 根节点 (T1) 放在 col=0
+        for n in tiers.get(1, []):
+            layout[n.node_id] = (0, 0)
 
-                if unlocked:
-                    bg = (30, 60, 30)
-                elif can:
-                    bg = (50, 60, 40) if hover else (35, 45, 30)
-                elif parents:
-                    bg = (40, 30, 30) if hover else (30, 25, 25)
+        # 逐层向下分配子节点列位置
+        for tier in range(2, 6):
+            for node in tiers.get(tier, []):
+                # 获取所有已布局的父节点列
+                parent_cols = []
+                for pid in node.parent_ids:
+                    if pid in layout:
+                        parent_cols.append(layout[pid][0])
+                if parent_cols:
+                    # 子节点放在父节点平均列（可处理双父合并）
+                    avg_col = sum(parent_cols) / len(parent_cols)
+                    col = int(avg_col)
+                    # 如果平均列不是整数，保留半列偏移以便居中
+                    if avg_col % 1 != 0:
+                        col = avg_col  # 允许半列
                 else:
-                    bg = (25, 25, 30)
+                    # 无父节点(通常不会发生)，顺序排列
+                    siblings = tiers.get(tier, [])
+                    idx = siblings.index(node)
+                    total = len(siblings)
+                    col = idx - (total - 1) / 2
+                layout[node.node_id] = (col, tier - 1)
 
-                pygame.draw.rect(self.screen, bg, rr)
-                pygame.draw.rect(self.screen, COLOR_HOTBAR_BORDER, rr, 1)
+        # 计算屏幕坐标
+        def node_pos(node_id):
+            col, row = layout.get(node_id, (0, 0))
+            cx = WIN_WIDTH // 2 + int(col * COL_SPACING)
+            cy = 70 + row * TIER_GAP
+            return cx, cy
 
-                st = "✓" if unlocked else ("▶ 解锁" if can else "🔒")
-                sc = COLOR_HIGHLIGHT if unlocked else ((100,255,100) if can else COLOR_TEXT_DIM)
-                self.screen.blit(self.font.render(f"{st}  {node.name}", True, sc), (rr.x+8, rr.y+4))
-                self.screen.blit(self.font_small.render(node.description, True, COLOR_TEXT_DIM), (rr.x+8, rr.y+26))
+        # ── 绘制连线 ──
+        for node in TECH_NODES.values():
+            cx, cy = node_pos(node.node_id)
+            # 从子节点向父节点画线
+            for pid in node.parent_ids:
+                if pid not in layout:
+                    continue
+                px, py = node_pos(pid)
+                # 父节点底部 → 子节点顶部
+                start = (px, py + NODE_H // 2)
+                end = (cx, cy - NODE_H // 2)
+                mid_y = (start[1] + end[1]) // 2
+                color = (80, 120, 80) if pid in self.tech_unlocked else (50, 50, 55)
+                # 先垂直线、再水平、再垂直线（阶梯线）
+                pygame.draw.line(self.screen, color, start, (start[0], mid_y), 2)
+                pygame.draw.line(self.screen, color, (start[0], mid_y), (end[0], mid_y), 2)
+                pygame.draw.line(self.screen, color, (end[0], mid_y), end, 2)
 
-                if not unlocked:
-                    xo = rr.right - 8
-                    for mid, amt in node.requirements.items():
-                        from item import ITEM_TEMPLATES as _it2
-                        tmpl = _it2.get(mid)
-                        mn = tmpl.name if tmpl else mid
-                        hv = inv.count(mid)
-                        c = COLOR_TEXT if hv >= amt else (255,80,80)
-                        m = self.font_small.render(f"{mn} {hv}/{amt}", True, c)
-                        xo -= m.get_width() + 6
-                        self.screen.blit(m, (xo, rr.y+6))
+        # ── 绘制节点卡片 ──
+        self._tech_buttons = []
+        for node in TECH_NODES.values():
+            cx, cy = node_pos(node.node_id)
+            rx, ry = cx - NODE_W // 2, cy - NODE_H // 2
+            rect = pygame.Rect(rx, ry, NODE_W, NODE_H)
 
-                if can:
-                    self._tech_buttons.append((rr, node))
-                y += rh + 4
+            unlocked = node.node_id in self.tech_unlocked
+            can = node.can_unlock(inv, self.tech_unlocked)
+            parents_ok = all(p in self.tech_unlocked for p in node.parent_ids)
+            hover = rect.collidepoint(mx, my)
 
-        self.screen.blit(self.font_small.render("点击绿色节点解锁  |  ESC 关闭", True, COLOR_TEXT_DIM), (60, WIN_HEIGHT-30))
+            # 背景色
+            if unlocked:
+                bg = (35, 65, 35)
+                border = (80, 160, 80)
+            elif can:
+                bg = (55, 70, 40) if hover else (40, 55, 35)
+                border = (120, 200, 80) if hover else (70, 120, 50)
+            elif parents_ok:
+                bg = (40, 30, 25) if hover else (30, 25, 20)
+                border = (80, 60, 40)
+            else:
+                bg = (25, 25, 30)
+                border = COLOR_HOTBAR_BORDER
+
+            pygame.draw.rect(self.screen, bg, rect, border_radius=6)
+            pygame.draw.rect(self.screen, border, rect, 2, border_radius=6)
+
+            # 状态图标 + 名称
+            st = "✓" if unlocked else ("▶" if can else "🔒")
+            sc = COLOR_HIGHLIGHT if unlocked else ((150, 255, 150) if can else COLOR_TEXT_DIM)
+            label = f"{st} {node.name}"
+            name_surf = self.font.render(label, True, sc)
+            self.screen.blit(name_surf, (rx + 8, ry + 6))
+
+            # 描述
+            desc = self.font_small.render(node.description, True, COLOR_TEXT_DIM)
+            self.screen.blit(desc, (rx + 8, ry + 28))
+
+            # 材料需求（右侧）
+            if not unlocked:
+                xo = rect.right - 8
+                for mid, amt in node.requirements.items():
+                    from item import ITEM_TEMPLATES as _it2
+                    tmpl = _it2.get(mid)
+                    mn = tmpl.name if tmpl else mid
+                    hv = inv.count(mid)
+                    c = COLOR_TEXT if hv >= amt else (255, 80, 80)
+                    m = self.font_small.render(f"{mn} {hv}/{amt}", True, c)
+                    xo -= m.get_width() + 6
+                    self.screen.blit(m, (xo, ry + 6))
+
+            if can:
+                self._tech_buttons.append((rect, node))
+
+        # 底部提示
+        if self._tech_buttons:
+            hint = self.font_small.render("🖱 点击绿色节点解锁  |  ESC 关闭", True, COLOR_TEXT_DIM)
+        else:
+            hint = self.font_small.render("无可用解锁项目  |  ESC 关闭", True, COLOR_TEXT_DIM)
+        self.screen.blit(hint, (60, WIN_HEIGHT - 30))
 
     def _draw_help(self):
         if not self.show_help:
