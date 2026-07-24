@@ -70,7 +70,7 @@ def draw_backpack_ui(screen, font, font_small, font_large,
     right_x = mid_x + col_w + panel_gap
 
     # 绘制三个面板
-    _draw_inventory_panel(screen, font, font_small, inv, left_x, top, col_w, col_h, mx, my, anim_frame)
+    draw_inventory_panel(screen, font, font_small, inv, left_x, top, col_w, col_h, mx, my, anim_frame)
     _draw_logistics_panel(screen, font, font_small, logistics, inv, mid_x, top, col_w, col_h, mx, my)
     _draw_crafting_panel(screen, font, font_small, inv, right_x, top, col_w, col_h, mx, my, craft_buttons)
 
@@ -79,7 +79,7 @@ def draw_backpack_ui(screen, font, font_small, font_large,
 # 左: 背包网格
 # ════════════════════════════════════════
 
-def _draw_inventory_panel(screen, font, font_small, inv: Inventory,
+def draw_inventory_panel(screen, font, font_small, inv: Inventory,
                           px, py, pw, ph, mx, my, anim_frame):
     # 面板背景
     pygame.draw.rect(screen, C["panel"], (px, py, pw, ph), border_radius=6)
