@@ -2,7 +2,7 @@
 
 import math
 import sys
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple, List, Optional
 
 import pygame
 
@@ -149,6 +149,8 @@ class GameWindow:
         self.show_tech_tree = False       # 科技树
         self.panel_building = None        # 当前打开的建筑
         self.tech_unlocked: set = set()   # 已解锁科技 ID 集合
+        self.cursor_item: Optional[str] = None  # 光标持有的物品ID
+        self.cursor_count: int = 0
         self.research_queue = ResearchQueue()
 
         # 拆除状态（长按展示进度条）
@@ -233,11 +235,19 @@ class GameWindow:
 
     def _on_keydown(self, key: int):
         if key == pygame.K_q:
-            # Q: 空手（取消选中 + 取消放置）
+            # Q: 清空光标 + 取消选中
+            self.cursor_item = None
+            self.cursor_count = 0
             self.player.inventory.selected = -1
             self.placing = False
             self.selected_building = None
             self.show_building_panel = False
+        elif key == pygame.K_z:
+            # Z: 从光标放1个到地图/传送带
+            self._drop_from_cursor()
+        elif key == pygame.K_f:
+            # F: 拾取脚下/附近物品
+            self._pickup_to_cursor()
         elif key == pygame.K_ESCAPE:
             self._quit()
         elif key == pygame.K_h:
@@ -459,6 +469,80 @@ class GameWindow:
         """取消拆除（松开右键或移开鼠标）"""
         self.demolish_target = None
         self.demolish_frames = 0
+
+    def _near_lane(self, belt) -> str:
+        """传送带靠近玩家一侧的车道"""
+        dx = self.player.x - belt.x
+        dy = self.player.y - belt.y
+        if belt.direction == 0:
+            return "left" if dx < 0 else "right"
+        elif belt.direction == 1:
+            return "left" if dy < 0 else "right"
+        elif belt.direction == 2:
+            return "right" if dx < 0 else "left"
+        else:
+            return "right" if dy < 0 else "left"
+
+    def _drop_from_cursor(self):
+        """Z: 从光标放1个物品到传送带/地面"""
+        if not self.cursor_item or self.cursor_count <= 0:
+            self._msg("光标没有物品")
+            return
+        if not self.mouse_in_map:
+            return
+        gx, gy = self.mouse_grid_pos
+        bld = self._building_at(gx, gy)
+        if bld and hasattr(bld, 'lanes'):
+            lane = self._near_lane(bld)
+            if bld.add_item(self.cursor_item, lane):
+                self.cursor_count -= 1
+                if self.cursor_count <= 0:
+                    self.cursor_item = None; self.cursor_count = 0
+                self._msg(f"Z↓ {self.cursor_item} → {lane}")
+            else:
+                self._msg("该车道已满")
+        else:
+            if not hasattr(self, '_ground_items'):
+                self._ground_items = {}
+            key = (gx, gy)
+            self._ground_items.setdefault(key, {})
+            self._ground_items[key][self.cursor_item] = self._ground_items[key].get(self.cursor_item, 0) + 1
+            self.cursor_count -= 1
+            if self.cursor_count <= 0:
+                self.cursor_item = None; self.cursor_count = 0
+            self._msg(f"Z↓ {self.cursor_item} 到地面")
+
+    def _pickup_to_cursor(self):
+        """F: 拾取附近物品到光标"""
+        if not self.mouse_in_map:
+            return
+        gx, gy = self.mouse_grid_pos
+        bld = self._building_at(gx, gy)
+        if bld and hasattr(bld, 'lanes'):
+            for ln in ("left", "right"):
+                lane = bld.lanes.get(ln, [])
+                if lane:
+                    item = lane.pop(0)
+                    if self.cursor_item == item["id"]:
+                        self.cursor_count += 1
+                    elif not self.cursor_item:
+                        self.cursor_item = item["id"]; self.cursor_count = 1
+                    else:
+                        self.player.inventory.add_item(item["id"], 1)
+                    self._msg(f"F↑ {item['id']}"); return
+        if hasattr(self, '_ground_items'):
+                key = (gx, gy)
+                if key in self._ground_items and self._ground_items[key]:
+                    iid, cnt = next(iter(self._ground_items[key].items()))
+                    del self._ground_items[key][iid]
+                    if not self._ground_items[key]: del self._ground_items[key]
+                    if self.cursor_item == iid:
+                        self.cursor_count += cnt
+                    elif not self.cursor_item:
+                        self.cursor_item = iid; self.cursor_count = cnt
+                    else:
+                        self.player.inventory.add_item(iid, cnt)
+                    self._msg(f"F↑ {iid} x{cnt}"); return
 
     def _place_with_selected(self, gx: int, gy: int):
         """根据选中的背包物品放置对应建筑（消耗物品）"""
@@ -1210,6 +1294,18 @@ class GameWindow:
                 return
 
 
+    def _draw_cursor(self):
+        if self.cursor_item and self.cursor_count > 0:
+            mx, my = pygame.mouse.get_pos()
+            from item import ITEM_TEMPLATES as _it
+            t = _it.get(self.cursor_item)
+            icon = t.icon if t else "?"
+            lbl = self.font.render(f"{icon} {self.cursor_count}", True, COLOR_HIGHLIGHT)
+            bg = pygame.Surface((lbl.get_width()+6, lbl.get_height()+4), pygame.SRCALPHA)
+            bg.fill((10, 10, 15, 180))
+            self.screen.blit(bg, (mx+16, my-10))
+            self.screen.blit(lbl, (mx+19, my-8))
+
     def _draw_help(self):
         if not self.show_help:
             return
@@ -1307,6 +1403,7 @@ class GameWindow:
             self._draw_tech_tree()
             self._draw_backpack_ui()
             self._draw_help()
+            self._draw_cursor()
             pygame.display.flip()
 
 
