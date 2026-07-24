@@ -920,7 +920,7 @@ class GameWindow:
         glow_r = TILE_SIZE
         for i in range(4):
             sr = glow_r + i * 6
-            alpha = int(35 * pulse) - i * 6WW
+            alpha = int(35 * pulse) - i * 6
             if alpha <= 0:
                 continue
             s = pygame.Surface((sr * 2, sr * 2), pygame.SRCALPHA)
