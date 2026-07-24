@@ -1,5 +1,6 @@
 """Pygame 图形窗口版 - 网格地图游戏"""
 
+import math
 import sys
 from typing import Dict, Tuple, List
 
@@ -16,7 +17,8 @@ from player import Player
 
 TILE_SIZE = 40
 MAP_COLS, MAP_ROWS = 20, 12
-SIDEBAR_WIDTH = 200
+SIDEBAR_WIDTH = 160
+SIDEBAR_COLLAPSED = 24
 
 WIN_WIDTH = MAP_COLS * TILE_SIZE + SIDEBAR_WIDTH
 MAP_HEIGHT = MAP_ROWS * TILE_SIZE
@@ -131,10 +133,17 @@ class GameWindow:
         self.demolish_frames = 0  # 已按住多少帧
         self.right_held = False  # 右键是否按住
 
+        # 侧栏折叠
+        self.sidebar_collapsed = False
+
+        # 选中建筑 + 动画帧
+        self.selected_building = None
+        self.anim_frame = 0
+
         # 鼠标状态
-        self.mouse_grid_pos: Tuple[int, int] = (-1, -1)  # 鼠标所在的格子
+        self.mouse_grid_pos: Tuple[int, int] = (-1, -1)
         self.mouse_in_map = False
-        self.hover_slot_idx = -1  # 悬浮在哪个背包格子上
+        self.hover_slot_idx = -1
 
     def _make_font(self, size: int):
         """从系统字体文件加载中文字体"""
@@ -180,9 +189,16 @@ class GameWindow:
             elif event.type == pygame.MOUSEMOTION:
                 self._on_mouse_move(event.pos)
             elif event.type == pygame.MOUSEBUTTONDOWN:
-                if event.button == 1:     # 左键
-                    self._on_left_click(event.pos)
-                elif event.button == 3:   # 右键按下 -> 开始拆除
+                if event.button == 1:
+                    # 检测侧栏折叠/展开点击
+                    mx, my = event.pos
+                    sw = SIDEBAR_COLLAPSED if self.sidebar_collapsed else SIDEBAR_WIDTH
+                    x0 = MAP_COLS * TILE_SIZE
+                    if x0 <= mx <= x0 + sw and 0 <= my <= MAP_HEIGHT:
+                        self.sidebar_collapsed = not self.sidebar_collapsed
+                    else:
+                        self._on_left_click(event.pos)
+                elif event.button == 3:
                     self.right_held = True
                     self._on_right_down(event.pos)
             elif event.type == pygame.MOUSEBUTTONUP:
@@ -318,11 +334,14 @@ class GameWindow:
             if sel and sel.item_id in ITEM_TO_BUILDING:
                 self._place_with_selected(gx, gy)
             else:
-                # 无建造材料 → 打开建筑面板
+                # 点击建筑 → 选中 + 侧栏详情
                 bld = self._building_at(gx, gy)
                 if bld:
+                    self.selected_building = bld
                     self.panel_building = bld
                     self.show_building_panel = True
+                else:
+                    self.selected_building = None
 
     def _building_at(self, gx: int, gy: int):
         """返回 (gx,gy) 处的建筑，没有则返回 None"""
@@ -431,6 +450,7 @@ class GameWindow:
 
     def _update_movement(self):
         """每帧根据持续按住的键移动（支持斜向）"""
+        self.anim_frame += 1
         self._tick_demolish()
         if self.placing or self.show_help or self.show_backpack or self.show_building_panel or self.show_tech_tree:
             return
@@ -473,26 +493,84 @@ class GameWindow:
     def _draw_building_cell(self, gx: int, gy: int, rect: pygame.Rect):
         color = (100, 100, 120)
         accent = (150, 150, 150)
+        bld = None
         for b in self.game_map.buildings:
             if b.x <= gx < b.x + b.w and b.y <= gy < b.y + b.h:
                 color = BUILDING_COLORS.get(b.name, color)
                 accent = BUILDING_ACCENT.get(b.name, accent)
+                bld = b
                 break
+
+        is_selected = (bld is not None and bld is self.selected_building)
+        inv = self.player.inventory
+
+        # 判断建筑状态
+        border_color = COLOR_GRID
+        show_glow = False
+        show_flash = False
+        show_full = False
+
+        if bld and bld.inputs:
+            has_mats = all(inv.count(iid) >= amt for iid, amt in bld.inputs.items())
+            if has_mats:
+                show_glow = True  # 正常生产中
+            else:
+                show_flash = True  # 停工（缺材料）
+
+        if bld and bld.outputs:
+            for oid, _ in bld.outputs.items():
+                if inv.count(oid) >= 20:
+                    show_full = True  # 堆满
+
+        # 绘制底色
         pygame.draw.rect(self.screen, color, rect)
+
+        # 内部纹理
         inner = rect.inflate(-6, -6)
         pygame.draw.rect(self.screen, accent, inner, 1)
+
+        # 选中高亮外框
+        if is_selected:
+            pygame.draw.rect(self.screen, COLOR_HIGHLIGHT, rect, 3)
+
+        # 呼吸光效（正常生产）
+        if show_glow:
+            glow = int(60 + 40 * abs(math.sin(self.anim_frame * 0.05)))
+            gs = pygame.Surface((TILE_SIZE, TILE_SIZE), pygame.SRCALPHA)
+            gs.fill((*accent, glow))
+            self.screen.blit(gs, rect)
+
+        # 橙黄闪烁（停工/故障）
+        if show_flash:
+            if (self.anim_frame // 15) % 2 == 0:
+                pygame.draw.rect(self.screen, (255, 160, 40), rect, 3)
+            else:
+                pygame.draw.rect(self.screen, (200, 100, 20), rect, 2)
+
+        # 堆满标识（右上角小三角）
+        if show_full:
+            tri = [(rect.right, rect.top), (rect.right - 12, rect.top), (rect.right, rect.top + 12)]
+            pygame.draw.polygon(self.screen, (255, 200, 50), tri)
+            exc = self.font_small.render("!", True, (30, 30, 35))
+            self.screen.blit(exc, (rect.right - 10, rect.top + 1))
 
     def _draw_player(self):
         cx = self.player.x * TILE_SIZE + TILE_SIZE // 2
         cy = self.player.y * TILE_SIZE + TILE_SIZE // 2
         r = TILE_SIZE // 2 - 4
-        # 光晕
-        for i in range(3):
-            sr = r + i * 3
+
+        # 呼吸光圈（整个格子大小的脉冲光晕）
+        pulse = abs(math.sin(self.anim_frame * 0.04))  # 0~1 呼吸
+        glow_r = TILE_SIZE
+        for i in range(4):
+            sr = glow_r + i * 6
+            alpha = int(35 * pulse) - i * 6
+            if alpha <= 0:
+                continue
             s = pygame.Surface((sr * 2, sr * 2), pygame.SRCALPHA)
-            alpha = 50 - i * 15
-            pygame.draw.circle(s, (255, 200, 50, alpha), (sr, sr), sr)
+            pygame.draw.circle(s, (255, 200, 50, max(0, alpha)), (sr, sr), sr)
             self.screen.blit(s, (cx - sr, cy - sr))
+
         # 身体
         pygame.draw.circle(self.screen, COLOR_PLAYER_OUTLINE, (cx, cy), r + 1)
         pygame.draw.circle(self.screen, COLOR_PLAYER, (cx, cy), r)
@@ -506,54 +584,99 @@ class GameWindow:
 
     def _draw_sidebar(self):
         x0 = MAP_COLS * TILE_SIZE
-        pygame.draw.rect(self.screen, COLOR_SIDEBAR, (x0, 0, SIDEBAR_WIDTH, WIN_HEIGHT))
+        inv = self.player.inventory
+
+        if self.sidebar_collapsed:
+            # 折叠态：仅窄条 + 展开箭头
+            pygame.draw.rect(self.screen, COLOR_SIDEBAR, (x0, 0, SIDEBAR_COLLAPSED, WIN_HEIGHT))
+            pygame.draw.line(self.screen, COLOR_GRID, (x0, 0), (x0, WIN_HEIGHT), 2)
+            arrow = self.font.render("<", True, COLOR_TEXT_DIM)
+            self.screen.blit(arrow, (x0 + 6, WIN_HEIGHT // 2 - 10))
+            return
+
+        # 展开态
+        sw = SIDEBAR_WIDTH
+        pygame.draw.rect(self.screen, COLOR_SIDEBAR, (x0, 0, sw, WIN_HEIGHT))
         pygame.draw.line(self.screen, COLOR_GRID, (x0, 0), (x0, WIN_HEIGHT), 2)
 
-        x = x0 + 12
-        y = 16
-        title = self.font_large.render("----", True, COLOR_HIGHLIGHT)
-        self.screen.blit(title, (x, y))
-        y += 32
+        # 折叠按钮（右上角）
+        fold = self.font.render(">", True, COLOR_TEXT_DIM)
+        fold_rect = fold.get_rect(topright=(x0 + sw - 6, 10))
+        self.screen.blit(fold, fold_rect)
 
+        x = x0 + 10
+        y = 16
+
+        # 标题
+        title = self.font_large.render("信息", True, COLOR_HIGHLIGHT)
+        self.screen.blit(title, (x, y))
+        y += 30
+
+        # 玩家信息
         for line in [
-            f"-: {self.player.name}",
-            f"-: Lv.{self.player.level}",
-            f"-: {self.player.hp}/{self.player.max_hp}",
+            f"玩家: {self.player.name}",
+            f"等级: Lv.{self.player.level}",
+            f"HP: {self.player.hp}/{self.player.max_hp}",
             f"坐标: ({self.player.x}, {self.player.y})",
         ]:
             self.screen.blit(self.font.render(line, True, COLOR_TEXT), (x, y))
+            y += 20
+        y += 6
+
+        # 选中建筑详情
+        if self.selected_building:
+            b = self.selected_building
+            self.screen.blit(
+                self.font.render(f"[选中] {b.name}", True, COLOR_HIGHLIGHT), (x, y))
             y += 22
-
-        y += 12
-        self.screen.blit(
-            self.font.render(f"建筑 ({len(self.game_map.buildings)})", True, COLOR_HIGHLIGHT), (x, y))
-        y += 24
-        for b in self.game_map.buildings[:7]:
+            for line in [
+                f"位置: ({b.x},{b.y}) {b.w}x{b.h}",
+                f"HP: {b.hp}/{b.max_hp}",
+                b.production_summary,
+            ]:
+                self.screen.blit(
+                    self.font_small.render(line, True, COLOR_TEXT_DIM), (x, y))
+                y += 17
+            # 输入材料背包存量
+            if b.inputs:
+                for iid, amt in b.inputs.items():
+                    from item import ITEM_TEMPLATES as _it
+                    tmpl = _it.get(iid)
+                    mn = tmpl.name if tmpl else iid
+                    hv = inv.count(iid)
+                    c = COLOR_TEXT if hv >= amt else (255, 80, 80)
+                    self.screen.blit(
+                        self.font_small.render(f"  {mn} {hv}/{amt}", True, c), (x, y))
+                    y += 16
+            y += 6
+        else:
+            # 建筑列表
             self.screen.blit(
-                self.font_small.render(f"  {b.name} ({b.x},{b.y})", True, COLOR_TEXT_DIM), (x, y))
-            y += 18
-        if len(self.game_map.buildings) > 7:
-            self.screen.blit(
-                self.font_small.render(f"  ... +{len(self.game_map.buildings)-7}", True, COLOR_TEXT_DIM), (x, y))
+                self.font.render(f"建筑 ({len(self.game_map.buildings)})", True, COLOR_HIGHLIGHT), (x, y))
+            y += 22
+            for b in self.game_map.buildings[:6]:
+                self.screen.blit(
+                    self.font_small.render(f"  {b.name} ({b.x},{b.y})", True, COLOR_TEXT_DIM), (x, y))
+                y += 16
+            if len(self.game_map.buildings) > 6:
+                self.screen.blit(
+                    self.font_small.render(f"  ... +{len(self.game_map.buildings)-6}", True, COLOR_TEXT_DIM), (x, y))
+            y += 6
 
-        # 背包摘要
-        y += 8
-        self.screen.blit(
-            self.font.render("背包", True, COLOR_HIGHLIGHT), (x, y))
-        y += 24
-        inv = self.player.inventory
+        # 背包摘要（精简）
+        self.screen.blit(self.font.render("背包", True, COLOR_HIGHLIGHT), (x, y))
+        y += 22
         items = inv.list_items()
         if items:
-            for s in items[:5]:
+            for s in items[:4]:
                 self.screen.blit(
                     self.font_small.render(f"  {s.icon} {s.name} x{s.quantity}", True, COLOR_TEXT_DIM), (x, y))
-                y += 18
-            if len(items) > 5:
+                y += 16
+            if len(items) > 4:
                 self.screen.blit(
-                    self.font_small.render(f"  ... +{len(items)-5}", True, COLOR_TEXT_DIM), (x, y))
+                    self.font_small.render(f"  ... +{len(items)-4}", True, COLOR_TEXT_DIM), (x, y))
         else:
-            self.screen.blit(
-                self.font_small.render("  (空)", True, COLOR_TEXT_DIM), (x, y))
+            self.screen.blit(self.font_small.render("  (空)", True, COLOR_TEXT_DIM), (x, y))
 
     def _draw_placement(self):
         if not self.placing:
