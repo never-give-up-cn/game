@@ -51,6 +51,11 @@ ITEM_TEMPLATES: Dict[str, Item] = {
     "science_purple":Item("science_purple","紫色科研瓶", "⚡", "science", "生产科技"),
     "science_yellow":Item("science_yellow","黄色科研瓶", "💡", "science", "实用科技"),
     "science_white": Item("science_white", "白色科研瓶", "⭐", "science", "太空科技"),
+    # DLC 科研瓶
+    "science_metallurgy": Item("science_metallurgy", "冶金科研瓶", "🔶", "science", "Vulcanus 冶金科技"),
+    "science_em":        Item("science_em",        "电磁科研瓶", "⚡", "science", "Fulgora 电磁科技"),
+    "science_agriculture":Item("science_agriculture","农业科研瓶", "🌱", "science", "Gleba 农业科技"),
+    "science_cryo":      Item("science_cryo",      "低温科研瓶", "❄",  "science", "Aquilo 低温科技"),
 }
 
 
