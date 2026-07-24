@@ -234,9 +234,15 @@ class GameWindow:
 
     def _on_keydown(self, key: int):
         if key == pygame.K_q:
-            # Q: 清空光标 + 取消选中
-            self.cursor_item = None
-            self.cursor_count = 0
+            # Q: 光标物品放回背包（不清空，背包满则保留光标）
+            if self.cursor_item and self.cursor_count > 0:
+                placed = self.player.inventory.add_item(self.cursor_item, self.cursor_count)
+                if placed >= self.cursor_count:
+                    self.cursor_item = None
+                    self.cursor_count = 0
+                else:
+                    self.cursor_count -= placed
+                self._msg(f"Q↑ 放回背包 ({placed}个)")
             self.player.inventory.selected = -1
             self.placing = False
             self.selected_building = None
