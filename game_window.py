@@ -7,6 +7,7 @@ import pygame
 
 from map_grid import MapGrid, TileType
 from building import Building, BUILDING_TEMPLATES
+from crafting import MANUAL_RECIPES, get_craftable_manual
 from player import Player
 
 
@@ -118,6 +119,7 @@ class GameWindow:
         self._msg("WASD 移动 | 左键放置 | 右键拆除 | H 帮助")
 
         self.show_help = False
+        self.show_backpack = False  # E 键背包界面
 
         # 拆除状态（长按展示进度条）
         self.demolish_target = None  # 正在拆除的建筑
@@ -188,9 +190,12 @@ class GameWindow:
             self._quit()
         elif key == pygame.K_h:
             self.show_help = not self.show_help
+        elif key == pygame.K_e:
+            self.show_backpack = not self.show_backpack
         elif key == pygame.K_ESCAPE:
             self.placing = False
             self.show_help = False
+            self.show_backpack = False
         elif key == pygame.K_b:
             if not self.placing:
                 self.placing = True
@@ -264,7 +269,19 @@ class GameWindow:
         return -1
 
     def _on_left_click(self, pos: Tuple[int, int]):
-        """鼠标左键：选中背包 / 放置建筑"""
+        """鼠标左键：选中背包 / 放置建筑 / 合成"""
+        # 背包界面打开时：点击合成
+        if self.show_backpack:
+            for rect, recipe in getattr(self, '_craft_buttons', []):
+                if rect.collidepoint(pos):
+                    inv = self.player.inventory
+                    if recipe.craft(inv):
+                        self._msg(f"合成 {recipe.name} x{recipe.quantity}")
+                    else:
+                        self._msg(f"材料不足，无法合成 {recipe.name}")
+                    return
+            return
+
         # 先检测是否点击在背包栏
         slot = self._get_clicked_slot(pos)
         if slot >= 0:
@@ -365,7 +382,7 @@ class GameWindow:
     def _update_movement(self):
         """每帧根据持续按住的键移动（支持斜向）"""
         self._tick_demolish()
-        if self.placing or self.show_help:
+        if self.placing or self.show_help or self.show_backpack:
             return
 
         dx, dy = 0, 0
@@ -643,6 +660,135 @@ class GameWindow:
             surf = self.font_small.render(label, True, COLOR_TEXT_DIM)
             self.screen.blit(surf, (bar_rect.x + 10, MAP_HEIGHT + HOTBAR_HEIGHT - 20))
 
+    # ========== 背包界面 ==========
+
+    def _draw_backpack_ui(self):
+        """背包界面 (E键) - 左背包 / 右合成"""
+        if not self.show_backpack:
+            return
+
+        inv = self.player.inventory
+        recipes = list(MANUAL_RECIPES.values())
+        craftable_ids = {r.recipe_id for r in get_craftable_manual(inv)}
+
+        # 半透明背景
+        overlay = pygame.Surface((WIN_WIDTH, WIN_HEIGHT), pygame.SRCALPHA)
+        overlay.fill((10, 10, 15, 230))
+        self.screen.blit(overlay, (0, 0))
+
+        mx, my = pygame.mouse.get_pos()
+        panel_pad = 30
+
+        # ===== 左栏: 物品列表 =====
+        left_w = MAP_COLS * TILE_SIZE // 2 - panel_pad
+        left_x = panel_pad
+        left_y = 50
+        left_h = WIN_HEIGHT - 100
+
+        # 标题
+        title = self.font_large.render("我的物品", True, COLOR_HIGHLIGHT)
+        self.screen.blit(title, (left_x, left_y - 28))
+
+        items = inv.list_items()
+        if items:
+            cell_sz = 38
+            gap = 4
+            cols = max(1, left_w // (cell_sz + gap))
+            for idx, stack in enumerate(items):
+                row = idx // cols
+                col = idx % cols
+                ix = left_x + col * (cell_sz + gap)
+                iy = left_y + row * (cell_sz + gap)
+                rect = pygame.Rect(ix, iy, cell_sz, cell_sz)
+                pygame.draw.rect(self.screen, COLOR_SLOT_HOVER, rect)
+                pygame.draw.rect(self.screen, COLOR_HOTBAR_BORDER, rect, 1)
+                # 图标
+                try:
+                    icon = self.font.render(stack.item.icon, True, COLOR_TEXT)
+                except Exception:
+                    icon = self.font.render("?", True, COLOR_TEXT)
+                self.screen.blit(icon, (ix + 2, iy + 2))
+                # 数量
+                if stack.quantity > 1:
+                    qty = self.font_small.render(str(stack.quantity), True, COLOR_HIGHLIGHT)
+                    self.screen.blit(qty, (ix + cell_sz - qty.get_width() - 2,
+                                           iy + cell_sz - qty.get_height() - 2))
+        else:
+            empty = self.font.render("  (空)", True, COLOR_TEXT_DIM)
+            self.screen.blit(empty, (left_x, left_y))
+
+        # ===== 右栏: 合成列表 =====
+        right_x = MAP_COLS * TILE_SIZE // 2 + panel_pad
+        right_w = MAP_COLS * TILE_SIZE // 2 - panel_pad * 2
+        right_y = 50
+
+        title2 = self.font_large.render("手动合成", True, COLOR_HIGHLIGHT)
+        self.screen.blit(title2, (right_x, right_y - 28))
+
+        if not recipes:
+            none = self.font.render("  无可合成的物品", True, COLOR_TEXT_DIM)
+            self.screen.blit(none, (right_x, right_y))
+        else:
+            self._craft_buttons = []  # [(rect, recipe), ...] 用于点击检测
+            ry = right_y
+            for recipe in recipes:
+                can_craft = recipe.recipe_id in craftable_ids
+                row_h = 44
+                if ry + row_h > WIN_HEIGHT - 30:
+                    break
+
+                # 背景
+                row_rect = pygame.Rect(right_x, ry, right_w, row_h)
+                if can_craft:
+                    if row_rect.collidepoint(mx, my):
+                        pygame.draw.rect(self.screen, (50, 80, 100), row_rect)
+                        pygame.draw.rect(self.screen, COLOR_SLOT_SELECTED, row_rect, 1)
+                    else:
+                        pygame.draw.rect(self.screen, (30, 45, 55), row_rect)
+                else:
+                    pygame.draw.rect(self.screen, (20, 25, 30), row_rect)
+
+                color = COLOR_TEXT if can_craft else COLOR_TEXT_DIM
+
+                # 配方名
+                name = self.font.render(recipe.name, True, color)
+                if can_craft and row_rect.collidepoint(mx, my):
+                    name = self.font.render(recipe.name, True, COLOR_HIGHLIGHT)
+                self.screen.blit(name, (right_x + 8, ry + 3))
+
+                # 材料明细
+                mat_parts = []
+                for mid, amt in recipe.materials.items():
+                    from item import ITEM_TEMPLATES
+                    tmpl = ITEM_TEMPLATES.get(mid)
+                    mname = tmpl.name if tmpl else mid
+                    have = inv.count(mid)
+                    has_enough = have >= amt
+                    mcolor = COLOR_TEXT if has_enough else (255, 80, 80)
+                    mat_parts.append(f"{mname}")
+                mat_str = " + ".join(mat_parts) if mat_parts else "(无材料)"
+                mat_str += f" → x{recipe.quantity}"
+                mat = self.font_small.render(mat_str, True, COLOR_TEXT_DIM)
+                self.screen.blit(mat, (right_x + 8, ry + 24))
+
+                # 材料数量（右上角显示拥有/需要）
+                x_off = right_x + right_w - 8
+                for mid, amt in recipe.materials.items():
+                    have = inv.count(mid)
+                    amt_str = self.font_small.render(f"{have}/{amt}", True,
+                                                     COLOR_TEXT if have >= amt else (255, 80, 80))
+                    x_off -= amt_str.get_width() + 4
+                    self.screen.blit(amt_str, (x_off, ry + 3))
+
+                if can_craft:
+                    self._craft_buttons.append((row_rect, recipe))
+
+                ry += row_h + 2
+
+        # 底部提示
+        hint = self.font_small.render("ESC 关闭  |  点击合成配方制作物品", True, COLOR_TEXT_DIM)
+        self.screen.blit(hint, (panel_pad, WIN_HEIGHT - 30))
+
     def _draw_help(self):
         if not self.show_help:
             return
@@ -660,6 +806,7 @@ class GameWindow:
             "W + D         右上 (斜向)",
             "S + A         左下 (斜向)",
             "S + D         右下 (斜向)", "",
+            "E             打开背包 / 合成界面",
             "1 ~ 8         选择背包物品",
             "左键背包格    选中物品",
             "左键地图      放置建筑（需选中建造材料）",
@@ -701,6 +848,7 @@ class GameWindow:
             self._draw_mouse_ghost()
             self._draw_demolish_bar()
             self._draw_messages()
+            self._draw_backpack_ui()
             self._draw_help()
             pygame.display.flip()
 
