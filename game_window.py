@@ -208,6 +208,11 @@ class GameWindow:
 
     def _on_keydown(self, key: int):
         if key == pygame.K_q:
+            # Q: 空手（取消选中 + 取消放置）
+            self.player.inventory.selected = -1
+            self.placing = False
+            self.selected_building = None
+        elif key == pygame.K_ESCAPE:
             self._quit()
         elif key == pygame.K_h:
             self.show_help = not self.show_help
@@ -216,12 +221,6 @@ class GameWindow:
             self.show_building_panel = False
         elif key == pygame.K_t:
             self.show_tech_tree = not self.show_tech_tree
-        elif key == pygame.K_ESCAPE:
-            self.placing = False
-            self.show_help = False
-            self.show_backpack = False
-            self.show_building_panel = False
-            self.show_tech_tree = False
         elif key == pygame.K_b:
             if not self.placing:
                 self.placing = True
@@ -826,8 +825,9 @@ class GameWindow:
                 num = self.font_small.render(str(col + 1), True, COLOR_TEXT_DIM)
                 self.screen.blit(num, (cx + 3, cy + 2))
 
-        # 选中物品名称
-        sel = inv.slots[inv.selected] if inv.selected < len(inv.slots) else None
+        # 选中物品名称（-1=空手）
+        sel_idx = inv.selected
+        sel = inv.slots[sel_idx] if 0 <= sel_idx < len(inv.slots) else None
         if sel:
             label = f"{sel.name}  ({sel.item.description})"
             surf = self.font_small.render(label, True, COLOR_TEXT_DIM)
@@ -1266,6 +1266,7 @@ class GameWindow:
                 ("左键背包格", "选中该物品"),
                 ("1~8 数字键", "快速选择物品格"),
                 ("左键配方",  "消耗材料合成物品"),
+                ("Q 键",     "空手（取消选中）"),
                 ("T 键",     "科技树（消耗物品解锁）"),
             ]),
             ("视觉提示", [
@@ -1279,7 +1280,7 @@ class GameWindow:
                 ("右侧面板",  "点击边缘 > 折叠/展开"),
                 ("底部热栏",  "背包物品快捷栏"),
                 ("侧栏详情",  "选中建筑后显示生产信息"),
-                ("ESC",      "关闭当前面板"),
+                ("ESC",      "退出游戏"),
                 ("H 键",     "开关本指南"),
             ]),
         ]

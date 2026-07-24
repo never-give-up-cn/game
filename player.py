@@ -34,8 +34,11 @@ class Player:
 
     @property
     def selected_slot(self) -> Optional[ItemStack]:
-        """当前选中的物品栏格子"""
-        return self.inventory.slots[self.inventory.selected] if self.inventory.slots else None
+        """当前选中的物品栏格子（-1=空手）"""
+        idx = self.inventory.selected
+        if idx < 0 or idx >= len(self.inventory.slots):
+            return None
+        return self.inventory.slots[idx]
 
     def status_line(self) -> str:
         """一行状态显示"""
