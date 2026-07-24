@@ -85,6 +85,25 @@ ITEM_TEMPLATES: Dict[str, Item] = {
     # ═══════ 弹药 ═══════
     "ammo_magazine": Item("ammo_magazine", "弹匣",  "=", "ammo", "步枪弹药"),
     "rocket":        Item("rocket",        "火箭弹","!", "ammo", "火箭弹药"),
+
+    # ═══════ 原生矿石（地图直接采集） ═══════
+    "iron_ore":     Item("iron_ore",     "铁矿石", "铁", "ore_raw", "铁矿脉"),
+    "copper_ore":   Item("copper_ore",   "铜矿石", "铜", "ore_raw", "铜矿脉"),
+    "uranium_ore":  Item("uranium_ore",  "铀矿石", "U",  "ore_raw", "铀矿脉"),
+    "crude_oil":    Item("crude_oil",    "原油",   "O",  "fluid_raw","原油矿脉"),
+    "water":        Item("water",        "水",     "W",  "fluid_raw","水源"),
+    "lava":         Item("lava",         "熔岩",   "L",  "fluid_raw","熔岩"),
+    "oil_sand":     Item("oil_sand",     "油砂",   "S",  "ore_raw", "油砂矿"),
+    "scrap":        Item("scrap",        "古代废料","X", "ore_raw", "废墟"),
+    "jellynut":     Item("jellynut",     "水母果", "J",  "bio_raw", "Gleba 生物"),
+    "yumako":       Item("yumako",       "玉玛果", "Y",  "bio_raw", "Gleba 生物"),
+    "iron_bac":     Item("iron_bac",     "铁细菌", "Fe", "bio_raw", "生物炼铁"),
+    "copper_bac":   Item("copper_bac",   "铜细菌", "Cu", "bio_raw", "生物炼铜"),
+    "nutrient":     Item("nutrient",     "养分",   "N",  "fluid_raw","生物流体"),
+    "bioflux":      Item("bioflux",      "生物通量","B", "fluid_raw","Gleba 流体"),
+    "lithium_brine":Item("lithium_brine","锂卤水", "Li", "fluid_raw","卤水矿"),
+    "ammonia":      Item("ammonia",      "氨水溶液","A", "fluid_raw","氨冰"),
+    "fluoride":     Item("fluoride",     "氟化物", "F",  "fluid_raw","氟矿"),
 }
 
 
