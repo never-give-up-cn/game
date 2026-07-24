@@ -3,6 +3,7 @@
 from typing import Tuple, Optional
 from item import ItemStack
 from backpack.inventory import Inventory
+from backpack.logistics import Logistics
 
 
 class Player:
@@ -17,6 +18,7 @@ class Player:
         self.level = 1
         self.gold = 0
         self.inventory = Inventory()
+        self.logistics = Logistics()
 
     @property
     def position(self) -> Tuple[int, int]:
