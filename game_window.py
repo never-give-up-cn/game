@@ -693,7 +693,8 @@ class GameWindow:
             cy2 = rect.centery
             for lane_name, off in [("left", -6), ("right", 6)]:
                 lane = bld.lanes.get(lane_name, [])
-                for item_id, progress in lane:
+                for item in lane:
+                    progress = 1.0 - item["pos"]
                     px = cx2 + int((progress - 0.5) * 16 * math.sin(rad))
                     py = cy2 - int((progress - 0.5) * 16 * math.cos(rad))
                     lx = px + int(off * math.cos(rad))
@@ -701,7 +702,7 @@ class GameWindow:
                     shades = {"iron": (140,140,160), "steel": (180,200,220),
                               "coal": (60,60,60), "stone": (140,130,120),
                               "iron_ore": (160,120,80), "copper_ore": (180,100,60)}
-                    ic = shades.get(item_id, (200,160,60))
+                    ic = shades.get(item["id"], (200,160,60))
                     pygame.draw.circle(self.screen, ic, (int(lx), int(ly)), 5)
 
     def _draw_player(self):
