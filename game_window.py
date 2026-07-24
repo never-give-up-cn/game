@@ -333,12 +333,10 @@ class GameWindow:
             if sel and sel.item_id in ITEM_TO_BUILDING:
                 self._place_with_selected(gx, gy)
             else:
-                # 点击建筑 → 选中 + 侧栏详情
+                # 点击建筑 → 选中，侧栏显示详情（不弹窗）
                 bld = self._building_at(gx, gy)
                 if bld:
                     self.selected_building = bld
-                    self.panel_building = bld
-                    self.show_building_panel = True
                 else:
                     self.selected_building = None
 
