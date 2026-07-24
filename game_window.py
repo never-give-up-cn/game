@@ -457,8 +457,8 @@ class GameWindow:
                 else:
                     self.panel_building = bld
                     self.show_building_panel = True
-            elif self.player.selected_slot and self.player.selected_slot.item_id in ITEM_TO_BUILDING:
-                # 无建筑 + 有建造材料 → 放置
+            elif (self.player.selected_slot and self.player.selected_slot.item_id in ITEM_TO_BUILDING) or \
+                 (self.cursor_item and self.cursor_item in ITEM_TO_BUILDING):
                 self._place_with_selected(gx, gy)
             else:
                 self.selected_building = None
@@ -577,21 +577,30 @@ class GameWindow:
                 self._msg(f"开采: {mined_id}")
 
     def _place_with_selected(self, gx: int, gy: int):
-        """根据选中的背包物品放置对应建筑（消耗物品）"""
-        sel = self.player.selected_slot
-        if not sel:
-            self._msg("请先选择背包中的物品")
+        """根据选中物品或光标放置建筑（消耗物品）"""
+        # 确定物品来源：光标 > 背包格
+        item_id = None
+        if self.cursor_item and self.cursor_item in ITEM_TO_BUILDING and self.cursor_count > 0:
+            item_id = self.cursor_item
+        elif self.player.selected_slot:
+            sel = self.player.selected_slot
+            if sel and sel.item_id in ITEM_TO_BUILDING:
+                item_id = sel.item_id
+        if not item_id:
+            self._msg("请选择可建造的物品")
             return
-        bld_name = ITEM_TO_BUILDING.get(sel.item_id)
-        if not bld_name:
-            self._msg(f"{sel.name} 不能用于建造")
-            return
+        bld_name = ITEM_TO_BUILDING.get(item_id)
         try:
             b = Building(gx, gy, bld_name)
             self.game_map.add_building(b)
-            # 消耗一个建筑物品
-            self.player.inventory.remove_item(sel.item_id, 1)
-            self._msg(f"放置 {b.name} 于 ({b.x},{b.y}) (剩余{self.player.inventory.count(sel.item_id)})")
+            # 消耗物品
+            if self.cursor_item == item_id:
+                self.cursor_count -= 1
+                if self.cursor_count <= 0:
+                    self.cursor_item = None; self.cursor_count = 0
+            else:
+                self.player.inventory.remove_item(item_id, 1)
+            self._msg(f"放置 {b.name} 于 ({b.x},{b.y})")
         except ValueError as e:
             self._msg(f"放置失败: {e}")
 
