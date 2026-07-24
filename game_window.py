@@ -510,6 +510,7 @@ class GameWindow:
             self._msg("光标没有物品")
             return
         if not self.mouse_in_map:
+            self._msg("鼠标不在游戏地图上")
             return
         gx, gy = self.mouse_grid_pos
         bld = self._building_at(gx, gy)
@@ -705,6 +706,25 @@ class GameWindow:
                 elif tile == TileType.BUILDING:
                     self._draw_building_cell(wx, wy, rect)
                 pygame.draw.rect(self.screen, COLOR_GRID, rect, 1)
+
+                # 地面物品渲染
+                if hasattr(self, '_ground_items'):
+                    gkey = (wx, wy)
+                    if gkey in self._ground_items and self._ground_items[gkey]:
+                        items_at = list(self._ground_items[gkey].items())
+                        if items_at:
+                            iid, cnt = items_at[0]
+                            from item import ITEM_TEMPLATES as _git
+                            t = _git.get(iid)
+                            ic = t.icon if t else "?"
+                            try:
+                                isurf = self.font_small.render(ic, True, COLOR_HIGHLIGHT)
+                            except:
+                                isurf = self.font_small.render("?", True, COLOR_HIGHLIGHT)
+                            self.screen.blit(isurf, (rect.x + 2, rect.y + 2))
+                            if cnt > 1:
+                                csurf = self.font_small.render(str(cnt), True, COLOR_HIGHLIGHT)
+                                self.screen.blit(csurf, (rect.right - csurf.get_width() - 2, rect.bottom - csurf.get_height() - 2))
 
     def _draw_building_cell(self, gx: int, gy: int, rect: pygame.Rect):
         color = (100, 100, 120)
